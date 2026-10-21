@@ -1,0 +1,24 @@
+tests/TursoSync.Tests/TursoBusyTimeoutTests.cs
+  s_13c93da46e3400::t_654d81539198f1 89-91
+src/TursoSync/TursoSyncDatabase.cs
+  s_13c93da46e3400::t_9e7bde1467bd12 120-126,129-148
+tests/TursoSync.Tests/TursoConnectBusyTests.cs
+  s_13c93da46e3400::t_32f83d31be6bff 1-11,14-96
+  s_13c93da46e3400::t_dfa48be058a6a1 12-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "384b64a773a77502ce4529b12ed66deabc6a900e",
+  "prompts": {},
+  "sessions": {
+    "s_13c93da46e3400": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "22a99e13-e427-4b60-b8a6-0d8f06860f21",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
