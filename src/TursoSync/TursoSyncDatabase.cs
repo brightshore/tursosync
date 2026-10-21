@@ -117,8 +117,48 @@ public sealed partial class TursoSyncDatabase : IDisposable
     /// <summary>
     /// Open a new connection to the synced database, driving the connect operation. The returned handle is
     /// a raw <c>turso_connection_t</c>; the caller owns it and must close/deinit it.
+    ///
+    /// <para>A contended connect is retried here until <paramref name="busyTimeoutMs"/> runs out. The engine's
+    /// connect runs a CDC pragma (and a CDC-version read) on a brand-new connection — through <c>prepare</c>,
+    /// which never consults the busy handler, and before any busy timeout has been set on it — so a connect
+    /// that landed while a checkpoint held the lock failed outright with <c>database tape error: database is
+    /// busy</c> (TursoConnectBusyTests). Unlike the statement retry reverted in TursoRawConnection, each attempt
+    /// here is a fresh connection with no snapshot to go stale, so retrying it is sound.</para>
     /// </summary>
     public IntPtr Connect(int busyTimeoutMs)
+    {
+        var timeout = busyTimeoutMs == 0 ? 5000 : busyTimeoutMs;
+        var deadline = Environment.TickCount64 + Math.Max(0, timeout);
+        var backoffMs = 1;
+        while (true)
+        {
+            try
+            {
+                return ConnectOnce(timeout);
+            }
+            catch (TursoException ex) when (ex.IsBusy || ex.IsBusySnapshot)
+            {
+                // Never sleep past the deadline, and never attempt once it has passed: the busy timeout is a
+                // bound on the whole connect, not on when the last attempt may start.
+                var remaining = deadline - Environment.TickCount64;
+                if (remaining <= 0)
+                {
+                    throw;
+                }
+
+                // Outside the gate, so whatever holds the lock (a checkpoint, a push) can finish meanwhile.
+                Thread.Sleep((int)Math.Min(backoffMs, remaining));
+                if (Environment.TickCount64 >= deadline)
+                {
+                    throw;
+                }
+
+                backoffMs = Math.Min(backoffMs * 2, 50);
+            }
+        }
+    }
+
+    private IntPtr ConnectOnce(int timeout)
     {
         lock (_gate)
         {
@@ -135,7 +175,6 @@ public sealed partial class TursoSyncDatabase : IDisposable
                 var status = TursoNative.SyncOperationExtractConnection(op, out var connection);
                 Check(status, IntPtr.Zero, "extract_connection");
 
-                var timeout = busyTimeoutMs == 0 ? 5000 : busyTimeoutMs;
                 if (timeout > 0)
                 {
                     TursoNative.ConnectionSetBusyTimeoutMs(connection, timeout);

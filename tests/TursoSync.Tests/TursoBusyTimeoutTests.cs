@@ -86,9 +86,9 @@ public class TursoBusyTimeoutTests
 
             var payload = new string('p', 2048);
 
-            // Every connection is opened BEFORE the load starts. Opening is itself contended (that is the
-            // separate `sync_database_connect ... busy` defect), and letting it race here would just measure
-            // that instead of the thing under test.
+            // Every connection is opened BEFORE the load starts. Opening is itself contended (Connect now
+            // waits that out — see TursoConnectBusyTests), and letting it race here would measure the wait
+            // instead of the thing under test.
             Trace("  seeded; opening connections");
             var writerConns = Enumerable.Range(0, Writers).Select(_ => TursoRawConnection.Open(db, busyTimeoutMs)).ToArray();
             using var readerConn = TursoRawConnection.Open(db, busyTimeoutMs);
