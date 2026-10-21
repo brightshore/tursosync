@@ -136,10 +136,23 @@ public sealed partial class TursoSyncDatabase : IDisposable
             {
                 return ConnectOnce(timeout);
             }
-            catch (TursoException ex) when ((ex.IsBusy || ex.IsBusySnapshot) && Environment.TickCount64 < deadline)
+            catch (TursoException ex) when (ex.IsBusy || ex.IsBusySnapshot)
             {
+                // Never sleep past the deadline, and never attempt once it has passed: the busy timeout is a
+                // bound on the whole connect, not on when the last attempt may start.
+                var remaining = deadline - Environment.TickCount64;
+                if (remaining <= 0)
+                {
+                    throw;
+                }
+
                 // Outside the gate, so whatever holds the lock (a checkpoint, a push) can finish meanwhile.
-                Thread.Sleep(backoffMs);
+                Thread.Sleep((int)Math.Min(backoffMs, remaining));
+                if (Environment.TickCount64 >= deadline)
+                {
+                    throw;
+                }
+
                 backoffMs = Math.Min(backoffMs * 2, 50);
             }
         }
