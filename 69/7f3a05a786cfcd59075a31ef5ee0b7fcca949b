@@ -1,0 +1,19 @@
+src/TursoSync/TursoSyncDatabase.cs
+  s_13c93da46e3400::t_9ecbf05688b518 139,141-148,150-155
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "697f3a05a786cfcd59075a31ef5ee0b7fcca949b",
+  "prompts": {},
+  "sessions": {
+    "s_13c93da46e3400": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "22a99e13-e427-4b60-b8a6-0d8f06860f21",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
