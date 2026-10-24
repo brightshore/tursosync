@@ -85,29 +85,61 @@ public sealed class TursoConnection : DbConnection
     /// <inheritdoc/>
     public override void Open()
     {
+        ThrowIfCannotOpen();
+
+        // Connection opens are expensive on Turso (especially the sync lane's metadata bootstrap), and the
+        // store opens per operation — so pool physical connections by default, like Npgsql/SQLite do. Lane
+        // selection (base vs sync) happens inside the physical connection: no remote → base local fast path.
+        _physical = RentIdle() ?? CreatePhysical();
+    }
+
+    /// <summary>
+    /// Open the connection without blocking the caller on a cold open.
+    ///
+    /// <para>An idle pooled connection is rented synchronously: that is cheap, and it is the common case. A new
+    /// physical connection is created on the thread pool instead, because creating one can block for as long as
+    /// the network takes: on the sync lane it connects through <see cref="TursoSyncDatabase.Connect"/>, which
+    /// waits for the database's gate, and a push or pull holds that gate across its whole HTTP round trip. A
+    /// caller that awaits this from a UI thread therefore waits without freezing, where before the whole open
+    /// ran on its thread.</para>
+    /// </summary>
+    public override async Task OpenAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfCannotOpen();
+
+        if (RentIdle() is { } idle)
+        {
+            _physical = idle;
+            return;
+        }
+
+        var created = await Task.Run(CreatePhysical, cancellationToken).ConfigureAwait(false);
+        if (_disposed)
+        {
+            // Disposed while the open was in flight: nothing will ever close this one, so release it now.
+            created.Dispose();
+            throw new ObjectDisposedException(GetType().FullName);
+        }
+
+        _physical = created;
+    }
+
+    private void ThrowIfCannotOpen()
+    {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_physical is not null)
         {
             throw new InvalidOperationException("The connection is already open.");
         }
-
-        var config = _options.ToConfig();
-
-        // Connection opens are expensive on Turso (especially the sync lane's metadata bootstrap), and the
-        // store opens per operation — so pool physical connections by default, like Npgsql/SQLite do. Lane
-        // selection (base vs sync) happens inside the physical connection: no remote → base local fast path.
-        _physical = _options.Pooling
-            ? TursoConnectionPool.Rent(_options.PoolKey, config, _options.Sync)
-            : TursoPhysicalConnection.Create(config, _options.Sync);
     }
 
-    /// <inheritdoc/>
-    public override Task OpenAsync(CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        Open();
-        return Task.CompletedTask;
-    }
+    /// <summary>An idle pooled physical connection, or null when pooling is off or none is idle.</summary>
+    private TursoPhysicalConnection? RentIdle() =>
+        _options.Pooling ? TursoConnectionPool.TryRentIdle(_options.PoolKey) : null;
+
+    private TursoPhysicalConnection CreatePhysical() =>
+        TursoPhysicalConnection.Create(_options.ToConfig(), _options.Sync);
 
     /// <inheritdoc/>
     public override void Close()

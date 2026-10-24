@@ -24,7 +24,12 @@ internal static class TursoConnectionPool
     private static readonly ConcurrentDictionary<string, ConcurrentQueue<TursoPhysicalConnection>> Pools = new(StringComparer.Ordinal);
 
     /// <summary>Rent a physical connection for <paramref name="config"/>, reusing an idle one if available.</summary>
-    public static TursoPhysicalConnection Rent(string key, TursoSyncConfig config, bool forceSync)
+    public static TursoPhysicalConnection Rent(string key, TursoSyncConfig config, bool forceSync) =>
+        TryRentIdle(key) ?? TursoPhysicalConnection.Create(config, forceSync);
+
+    /// <summary>An idle, healthy pooled connection for <paramref name="key"/>, or null if there is none. Never
+    /// creates one, so it never waits on a sync database's gate.</summary>
+    public static TursoPhysicalConnection? TryRentIdle(string key)
     {
         if (Pools.TryGetValue(key, out var queue))
         {
@@ -43,7 +48,7 @@ internal static class TursoConnectionPool
             }
         }
 
-        return TursoPhysicalConnection.Create(config, forceSync);
+        return null;
     }
 
     /// <summary>Return a physical connection to the pool, or dispose it if the pool is full / it's unhealthy.</summary>
