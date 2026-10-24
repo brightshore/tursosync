@@ -1,5 +1,12 @@
 # TursoSync
 
+## 1.4.2
+
+### 🩹 Fixes
+
+- TursoConnection.OpenAsync no longer blocks its caller while a new connection is being opened. Opening a fresh connection on a synced database waits for any push or pull in progress, which can take as long as the network does; that wait now happens on the thread pool, so an app awaiting OpenAsync on its UI thread stays responsive. Renting an idle pooled connection is unchanged and still completes immediately.
+- Opening several sync engines on the same database at once no longer fails intermittently with "Could not find file '…-info'". Each engine rewrote the database's -info sidecar through the same temporary file name, so concurrent writers could collide; every write now uses its own temporary file and still replaces the sidecar atomically. On Windows, rewriting or reading a sidecar while another engine is replacing it no longer fails with "Access to the path is denied" or "being used by another process", and a reader no longer sees the sidecar as momentarily missing (which the engine would have taken as no sync metadata).
+
 ## 1.4.1
 
 ### 🩹 Fixes
