@@ -484,14 +484,14 @@ public sealed partial class TursoSyncDatabase : IDisposable
             Check(status, IntPtr.Zero, "io_request_full_read");
             var path = SliceToString(req.Path);
 
-            if (!File.Exists(path))
+            using var stream = OpenForFullRead(path);
+            if (stream is null)
             {
                 // A missing file must be treated as an empty file (per the ABI contract).
                 TursoNative.SyncIoDone(item);
                 return;
             }
 
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             PumpStream(item, stream);
             TursoNative.SyncIoDone(item);
         }
@@ -519,6 +519,48 @@ public sealed partial class TursoSyncDatabase : IDisposable
     }
 
     /// <summary>
+    /// Open a file for the engine's whole-file read, sharing it with writers that may replace it, or null if it
+    /// doesn't exist.
+    ///
+    /// <para>On Windows the open is refused (<c>being used by another process</c>) while
+    /// <see cref="WriteFileAtomically"/>'s rename is replacing the file, so a refusal is retried briefly, as the
+    /// rename is.</para>
+    ///
+    /// <para>Windows can also show the file as briefly MISSING mid-replace: its replacing rename is not atomic to a
+    /// reader the way <c>rename(2)</c> is (measured: one run in ten of TursoAtomicWriteTests). The engine reads a
+    /// missing file as empty, which for <c>-info</c> would mean no sync metadata, so on Windows a missing file is
+    /// looked for again for <see cref="MissingRecheckMs"/> before it is believed. A file that really doesn't exist yet
+    /// costs that wait once.</para>
+    /// </summary>
+    internal static FileStream? OpenForFullRead(string path)
+    {
+        var deadline = Environment.TickCount64 + RenameRetryForMs;
+        var missingDeadline = Environment.TickCount64 + (OperatingSystem.IsWindows() ? MissingRecheckMs : 0);
+        var backoffMs = 1;
+        while (true)
+        {
+            try
+            {
+                return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                if (Environment.TickCount64 >= missingDeadline)
+                {
+                    return null;
+                }
+
+                Thread.Sleep(1);
+            }
+            catch (Exception ex) when (IsTransientRenameRefusal(ex) && Environment.TickCount64 < deadline)
+            {
+                Thread.Sleep(backoffMs);
+                backoffMs = Math.Min(backoffMs * 2, 20);
+            }
+        }
+    }
+
+    /// <summary>
     /// Replace <paramref name="path"/> with <paramref name="content"/>: write a temp file beside it, then rename it
     /// over the destination. The rename is atomic, so a reader sees the old file or the new one, never a partial
     /// or missing one.
@@ -527,6 +569,12 @@ public sealed partial class TursoSyncDatabase : IDisposable
     /// writing the same sidecar (each sync engine rewrites <c>-info</c>) shared: one renamed it into place, the
     /// other's rename then found its temp file gone and failed with <c>Could not find file '…-info'</c>, failing
     /// that engine's whole operation (TursoAtomicWriteTests).</para>
+    ///
+    /// <para>On Windows the rename can also be refused outright, <c>Access to the path is denied</c>, while another
+    /// rename onto the same file or a read of it is in flight (measured: 135 of 600 renames by four concurrent
+    /// writers, with no reader at all; <see cref="FileShare.Delete"/> on the reader did not help). That refusal lasts
+    /// only as long as the other operation, so the rename is retried briefly. A missing file is never retried: that
+    /// is a real failure, not contention.</para>
     /// </summary>
     internal static void WriteFileAtomically(string path, byte[] content)
     {
@@ -541,7 +589,7 @@ public sealed partial class TursoSyncDatabase : IDisposable
         try
         {
             File.WriteAllBytes(tmp, content);
-            File.Move(tmp, path, overwrite: true);
+            MoveReplacingWithRetry(tmp, path);
         }
         catch
         {
@@ -549,6 +597,32 @@ public sealed partial class TursoSyncDatabase : IDisposable
             throw;
         }
     }
+
+    private const int RenameRetryForMs = 2000;
+    private const int MissingRecheckMs = 50;
+
+    private static void MoveReplacingWithRetry(string source, string destination)
+    {
+        var deadline = Environment.TickCount64 + RenameRetryForMs;
+        var backoffMs = 1;
+        while (true)
+        {
+            try
+            {
+                File.Move(source, destination, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (IsTransientRenameRefusal(ex) && Environment.TickCount64 < deadline)
+            {
+                Thread.Sleep(backoffMs);
+                backoffMs = Math.Min(backoffMs * 2, 20);
+            }
+        }
+    }
+
+    private static bool IsTransientRenameRefusal(Exception ex) =>
+        ex is UnauthorizedAccessException
+        || ex is IOException and not FileNotFoundException and not DirectoryNotFoundException;
 
     private static void PumpStream(IntPtr item, Stream stream)
     {
