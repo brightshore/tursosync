@@ -508,25 +508,45 @@ public sealed partial class TursoSyncDatabase : IDisposable
         {
             var status = TursoNative.SyncIoRequestFullWrite(item, out var req);
             Check(status, IntPtr.Zero, "io_request_full_write");
-            var path = SliceToString(req.Path);
-            var content = SliceToBytes(req.Content) ?? [];
-
-            var dir = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(dir))
-            {
-                Directory.CreateDirectory(dir);
-            }
-
-            // Atomic-ish: write to a temp file then rename over the destination.
-            var tmp = path + ".tmp";
-            File.WriteAllBytes(tmp, content);
-            File.Move(tmp, path, overwrite: true);
+            WriteFileAtomically(SliceToString(req.Path), SliceToBytes(req.Content) ?? []);
             TursoNative.SyncIoDone(item);
         }
         catch (Exception ex)
         {
             Poison(item, ex.Message);
             TursoNative.SyncIoDone(item);
+        }
+    }
+
+    /// <summary>
+    /// Replace <paramref name="path"/> with <paramref name="content"/>: write a temp file beside it, then rename it
+    /// over the destination. The rename is atomic, so a reader sees the old file or the new one, never a partial
+    /// or missing one.
+    ///
+    /// <para>The temp name is unique per write. It used to be a fixed <c>path + ".tmp"</c>, which two engines
+    /// writing the same sidecar (each sync engine rewrites <c>-info</c>) shared: one renamed it into place, the
+    /// other's rename then found its temp file gone and failed with <c>Could not find file '…-info'</c>, failing
+    /// that engine's whole operation (TursoAtomicWriteTests).</para>
+    /// </summary>
+    internal static void WriteFileAtomically(string path, byte[] content)
+    {
+        var dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir))
+        {
+            Directory.CreateDirectory(dir);
+        }
+
+        // Same directory as the destination, so the rename never crosses a filesystem (where it stops being atomic).
+        var tmp = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllBytes(tmp, content);
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(tmp); } catch { /* best effort: never mask the original failure */ }
+            throw;
         }
     }
 
