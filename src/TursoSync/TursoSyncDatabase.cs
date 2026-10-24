@@ -13,6 +13,10 @@ namespace Turso.Sync;
 public sealed partial class TursoSyncDatabase : IDisposable
 {
     private readonly object _gate = new();
+
+    /// <summary>The lock every engine operation holds, connect included. Tests hold it to stand in for a push or
+    /// pull that is on the network.</summary>
+    internal object Gate => _gate;
     private readonly HttpClient _http;
     private readonly string _baseUrl;
     private readonly string? _authToken;
