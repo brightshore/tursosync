@@ -16,6 +16,11 @@ public sealed class TursoConnection : DbConnection
     private bool _disposed;
     private bool _readUncommitted;
 
+    // A cold OpenAsync in flight: State reads Connecting, and another open is refused. Close() abandons it by
+    // moving _openAttempt on, so the attempt that finishes afterwards sees it no longer owns the connection.
+    private bool _opening;
+    private int _openAttempt;
+
     /// <summary>Create an unopened connection.</summary>
     public TursoConnection() : this(string.Empty)
     {
@@ -51,7 +56,8 @@ public sealed class TursoConnection : DbConnection
     public override string ServerVersion => typeof(TursoConnection).Assembly.GetName().Version?.ToString() ?? "0.0.0";
 
     /// <inheritdoc/>
-    public override ConnectionState State => _physical is null ? ConnectionState.Closed : ConnectionState.Open;
+    public override ConnectionState State =>
+        _physical is not null ? ConnectionState.Open : _opening ? ConnectionState.Connecting : ConnectionState.Closed;
 
     /// <inheritdoc/>
     protected override DbProviderFactory DbProviderFactory => TursoFactory.Instance;
@@ -85,33 +91,109 @@ public sealed class TursoConnection : DbConnection
     /// <inheritdoc/>
     public override void Open()
     {
+        ThrowIfCannotOpen();
+
+        // Connection opens are expensive on Turso (especially the sync lane's metadata bootstrap), and the
+        // store opens per operation — so pool physical connections by default, like Npgsql/SQLite do. Lane
+        // selection (base vs sync) happens inside the physical connection: no remote → base local fast path.
+        _physical = RentIdle() ?? CreatePhysical();
+    }
+
+    /// <summary>
+    /// Open the connection without blocking the caller on a cold open.
+    ///
+    /// <para>An idle pooled connection is rented synchronously: that is cheap, and it is the common case. A new
+    /// physical connection is created on the thread pool instead, because creating one can block for as long as
+    /// the network takes: on the sync lane it connects through <see cref="TursoSyncDatabase.Connect"/>, which
+    /// waits for the database's gate, and a push or pull holds that gate across its whole HTTP round trip. A
+    /// caller that awaits this from a UI thread therefore waits without freezing, where before the whole open
+    /// ran on its thread.</para>
+    ///
+    /// <para>While that open is in flight <see cref="State"/> is <see cref="ConnectionState.Connecting"/>.
+    /// Cancelling it, or closing or disposing the connection, abandons it: the physical connection, once made, is
+    /// released rather than installed. Cancellation can't interrupt the connect itself; it takes effect when the
+    /// connect returns.</para>
+    /// </summary>
+    public override async Task OpenAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfCannotOpen();
+
+        if (RentIdle() is { } idle)
+        {
+            _physical = idle;
+            return;
+        }
+
+        var attempt = ++_openAttempt;
+        _opening = true;
+        TursoPhysicalConnection created;
+        try
+        {
+            // The token only stops a connect that hasn't started; one that has runs to the end, and is handled below.
+            created = await Task.Run(
+                () =>
+                {
+                    ColdOpenStarting?.Invoke();
+                    return CreatePhysical();
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (attempt == _openAttempt)
+            {
+                _opening = false;
+            }
+        }
+
+        if (attempt != _openAttempt || _disposed || cancellationToken.IsCancellationRequested)
+        {
+            // Nothing will ever close a connection nobody installed, so release it here.
+            created.Dispose();
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new OperationCanceledException("The connection was closed while it was opening.");
+        }
+
+        _physical = created;
+    }
+
+    /// <summary>Raised on the thread pool as a cold <see cref="OpenAsync(CancellationToken)"/> begins its connect,
+    /// so a test can act once the connect is really under way (a cancel before then never reaches it).</summary>
+    internal static Action? ColdOpenStarting;
+
+    private void ThrowIfCannotOpen()
+    {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_physical is not null)
         {
             throw new InvalidOperationException("The connection is already open.");
         }
 
-        var config = _options.ToConfig();
-
-        // Connection opens are expensive on Turso (especially the sync lane's metadata bootstrap), and the
-        // store opens per operation — so pool physical connections by default, like Npgsql/SQLite do. Lane
-        // selection (base vs sync) happens inside the physical connection: no remote → base local fast path.
-        _physical = _options.Pooling
-            ? TursoConnectionPool.Rent(_options.PoolKey, config, _options.Sync)
-            : TursoPhysicalConnection.Create(config, _options.Sync);
+        if (_opening)
+        {
+            throw new InvalidOperationException("The connection is already opening.");
+        }
     }
 
-    /// <inheritdoc/>
-    public override Task OpenAsync(CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        Open();
-        return Task.CompletedTask;
-    }
+    /// <summary>An idle pooled physical connection, or null when pooling is off or none is idle.</summary>
+    private TursoPhysicalConnection? RentIdle() =>
+        _options.Pooling ? TursoConnectionPool.TryRentIdle(_options.PoolKey) : null;
+
+    private TursoPhysicalConnection CreatePhysical() =>
+        TursoPhysicalConnection.Create(_options.ToConfig(), _options.Sync);
 
     /// <inheritdoc/>
     public override void Close()
     {
+        if (_opening)
+        {
+            // Abandon the open in flight: it releases what it makes instead of installing it.
+            _openAttempt++;
+            _opening = false;
+        }
+
         if (_physical is not null)
         {
             if (_options.Pooling)
