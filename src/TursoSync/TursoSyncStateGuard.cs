@@ -69,10 +69,9 @@ internal static class TursoSyncStateGuard
                 StampedUtc = DateTimeOffset.UtcNow.ToString("O"),
             });
 
-            // Atomic-ish, same pattern as the engine's own sidecar writes: temp file, then rename over.
-            var tmp = path + ".tmp";
-            File.WriteAllText(tmp, json);
-            File.Move(tmp, path, overwrite: true);
+            // The same atomic replace as the engine's own sidecar writes, unique temp name included: concurrent
+            // creates of one replica each stamp it.
+            TursoSyncDatabase.WriteFileAtomically(path, System.Text.Encoding.UTF8.GetBytes(json));
         }
         catch
         {
