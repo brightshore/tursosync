@@ -184,6 +184,11 @@ internal static class TursoNative
     [DllImport(Lib, EntryPoint = "turso_connection_set_busy_timeout_ms", CallingConvention = CallingConvention.Cdecl)]
     public static extern void ConnectionSetBusyTimeoutMs(IntPtr connection, long ms);
 
+    /// <summary>True while the connection is in autocommit mode, i.e. holds no open transaction.</summary>
+    [DllImport(Lib, EntryPoint = "turso_connection_get_autocommit", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static extern bool ConnectionGetAutocommit(IntPtr connection);
+
     [DllImport(Lib, EntryPoint = "turso_connection_prepare_single", CallingConvention = CallingConvention.Cdecl)]
     public static extern TursoStatus ConnectionPrepareSingle(
         IntPtr connection,

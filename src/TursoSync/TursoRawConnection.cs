@@ -18,14 +18,18 @@ public sealed class TursoRawConnection : IDisposable
     private IntPtr _baseDatabase;
     private bool _disposed;
 
+    /// <summary>How long a contended prepare may wait for the lock (<see cref="Prepare"/>); 0 or less never waits.</summary>
+    private readonly int _busyTimeoutMs;
+
     static TursoRawConnection() => TursoNativeLibrary.EnsureResolver();
 
-    private TursoRawConnection(IntPtr connection, TursoSyncDatabase? syncDatabase, IntPtr baseDatabase, Action? pump)
+    private TursoRawConnection(IntPtr connection, TursoSyncDatabase? syncDatabase, IntPtr baseDatabase, Action? pump, int busyTimeoutMs)
     {
         _connection = connection;
         _syncDatabase = syncDatabase;
         _baseDatabase = baseDatabase;
         _pump = pump;
+        _busyTimeoutMs = busyTimeoutMs;
     }
 
     // NOTE — a managed busy-retry was tried here on 2026-08-01 and REVERTED; do not reintroduce it without
@@ -48,6 +52,13 @@ public sealed class TursoRawConnection : IDisposable
     // 3-second probe arm ran indefinitely at 165% CPU, versus 3.0 s with retry off (650 ok / 55,740 busy).
     // Retry-off + no checkpoint and retry-on + no checkpoint both complete cleanly — it is specifically
     // retrying a stale snapshot underneath a checkpoint that wedges.
+    //
+    // What IS retried now is narrower, and sound for the same reason Connect's retry is: Prepare() waits out a
+    // busy prepare_single, but only while the connection is in AUTOCOMMIT. A prepare that failed outside a
+    // transaction leaves nothing behind (no statement, no snapshot), so the next attempt starts fresh and sees
+    // the WAL as the finished checkpoint left it. Inside a transaction the connection holds a snapshot a
+    // checkpoint may have made stale, so there a busy prepare still fails at once, as it always has, and the
+    // caller rolls back and restarts. Step is still never retried here.
 
     /// <summary>The owning synced database, or null for a base (local, non-sync) connection.</summary>
     public TursoSyncDatabase? SyncDatabase => _syncDatabase;
@@ -63,7 +74,8 @@ public sealed class TursoRawConnection : IDisposable
     {
         ArgumentNullException.ThrowIfNull(database);
         return new TursoRawConnection(
-            database.Connect(busyTimeoutMs), database, IntPtr.Zero, database.ProcessOneIo);
+            database.Connect(busyTimeoutMs), database, IntPtr.Zero, database.ProcessOneIo,
+            busyTimeoutMs == 0 ? 5000 : busyTimeoutMs);
     }
 
     /// <summary>
@@ -96,7 +108,7 @@ public sealed class TursoRawConnection : IDisposable
                 TursoNative.ConnectionSetBusyTimeoutMs(connection, timeout);
             }
 
-            return new TursoRawConnection(connection, null, database, pump: null);
+            return new TursoRawConnection(connection, null, database, pump: null, timeout);
         }
         catch
         {
@@ -105,12 +117,52 @@ public sealed class TursoRawConnection : IDisposable
         }
     }
 
-    /// <summary>Prepare a single statement. Lock contention surfaces as a <see cref="TursoException"/> with
-    /// <see cref="TursoException.IsBusy"/> set — see the note above on why it is not retried here.</summary>
+    /// <summary>
+    /// Prepare a single statement.
+    ///
+    /// <para>Outside a transaction, a prepare that finds the database locked (a checkpoint holds it, typically)
+    /// is retried until the connection's busy timeout runs out, the wait the engine's own busy handler gives a
+    /// step but not a prepare. Inside a transaction it is not: lock contention surfaces at once as a
+    /// <see cref="TursoException"/> with <see cref="TursoException.IsBusy"/> or
+    /// <see cref="TursoException.IsBusySnapshot"/> set, and the transaction must be restarted. The note above
+    /// says why the two differ.</para>
+    /// </summary>
     public TursoRawStatement Prepare(string sql)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(sql);
+
+        var deadline = Environment.TickCount64 + Math.Max(0, _busyTimeoutMs);
+        var backoffMs = 1;
+        while (true)
+        {
+            try
+            {
+                return PrepareOnce(sql);
+            }
+            catch (TursoException ex) when ((ex.IsBusy || ex.IsBusySnapshot) && TursoNative.ConnectionGetAutocommit(_connection))
+            {
+                // Same rules as TursoSyncDatabase.Connect: the busy timeout bounds the whole prepare, so never
+                // sleep past the deadline and never attempt once it has passed.
+                var remaining = deadline - Environment.TickCount64;
+                if (remaining <= 0)
+                {
+                    throw;
+                }
+
+                Thread.Sleep((int)Math.Min(backoffMs, remaining));
+                if (Environment.TickCount64 >= deadline)
+                {
+                    throw;
+                }
+
+                backoffMs = Math.Min(backoffMs * 2, 50);
+            }
+        }
+    }
+
+    private TursoRawStatement PrepareOnce(string sql)
+    {
         var status = TursoNative.ConnectionPrepareSingle(_connection, sql, out var stmt, out var errorPtr);
         TursoSyncDatabase.Check(status, errorPtr, "prepare_single");
         return new TursoRawStatement(stmt, _pump);

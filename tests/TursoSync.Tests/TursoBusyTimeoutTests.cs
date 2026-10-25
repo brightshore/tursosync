@@ -7,12 +7,13 @@ namespace TursoSync.Tests;
 /// <summary>
 /// Whether the connection's busy timeout is actually honoured, and where.
 ///
-/// <para>Under concurrent load the dominant error by a wide margin is
+/// <para>Under concurrent load the dominant error by a wide margin used to be
 /// <c>prepare_single: database is locked</c> — 744,934 of 745,096 errors in one 25 s run — even though every
 /// connection is opened with a 5000 ms busy timeout, which should make a contended statement WAIT rather than
 /// fail. The measurement that settles it is time-to-failure: a honoured timeout means a busy call blocks for
-/// roughly that long before giving up, so a failure returning in microseconds means the handler was never
-/// consulted on that path.</para>
+/// roughly that long before giving up, so a failure returning in microseconds means nothing waited. The
+/// engine's busy handler covers step only; <see cref="TursoRawConnection.Prepare"/> now gives a prepare the
+/// same wait outside a transaction, and these tests pin both halves of that contract.</para>
 /// </summary>
 [TestClass]
 public class TursoBusyTimeoutTests
@@ -21,7 +22,7 @@ public class TursoBusyTimeoutTests
     private const int MeasureSeconds = 3;
 
     /// <summary>Gap between checkpoints in the contended arms. Frequent enough to collide with statements
-    /// constantly, but leaving windows in which a retry can actually get through.</summary>
+    /// constantly, but leaving windows in which a waiting prepare can actually get through.</summary>
     private const int CheckpointEveryMs = 100;
 
     /// <summary>The two busy timeouts compared. Far enough apart (25x) that a honoured timeout could not
@@ -30,13 +31,13 @@ public class TursoBusyTimeoutTests
     private const int LongTimeoutMs = 5000;
 
     [TestMethod]
-    public void BusyTimeout_TimeToFailure_AtPrepareAndStep()
+    public void Outside_A_Transaction_A_Prepare_Waits_Out_A_Checkpoint()
     {
         SkipUnlessNative();
 
-        var noCheckpoint = Measure(ShortTimeoutMs, checkpointing: false);
-        var shortTimeout = Measure(ShortTimeoutMs, checkpointing: true);
-        var longTimeout = Measure(LongTimeoutMs, checkpointing: true);
+        var noCheckpoint = Measure(ShortTimeoutMs, CheckpointEveryMs, checkpointing: false);
+        var shortTimeout = Measure(ShortTimeoutMs, CheckpointEveryMs, checkpointing: true);
+        var longTimeout = Measure(LongTimeoutMs, CheckpointEveryMs, checkpointing: true);
 
         Report($"{ShortTimeoutMs}ms, no checkpoint", noCheckpoint);
         Report($"{ShortTimeoutMs}ms + checkpoint", shortTimeout);
@@ -45,21 +46,55 @@ public class TursoBusyTimeoutTests
         // A concurrent writer alone must never fail a reader — WAL readers do not block on a writer.
         noCheckpoint.Busy.Should().Be(0, "a concurrent writer alone must never fail a reader");
 
-        // A concurrent checkpoint, on the other hand, fails statements outright.
-        shortTimeout.Busy.Should().BeGreaterThan(0, "a concurrent checkpoint is what produces contention");
-        longTimeout.Busy.Should().BeGreaterThan(0, "a concurrent checkpoint is what produces contention");
-
-        // THE DEFECT, pinned. A honoured busy timeout would make a contended statement wait — raising it 25x
-        // would raise time-to-failure with it. Instead both fail in microseconds: the engine's busy handler
-        // is not consulted on this path. When that is fixed in the engine, this assertion flips and should be
-        // rewritten to require the wait rather than document its absence.
-        longTimeout.MedianFailMs.Should().BeLessThan(LongTimeoutMs / 10.0,
-            "the busy timeout is NOT consulted — statements fail immediately instead of waiting it out");
-        longTimeout.MedianFailMs.Should().BeApproximately(shortTimeout.MedianFailMs, 5.0,
-            "time-to-failure is independent of the configured timeout, which is the tell");
+        // A checkpoint every 100 ms used to fail statements at prepare in microseconds, tens of thousands of
+        // times a run, whatever the timeout. Each checkpoint ends well inside either timeout, so a prepare that
+        // waits rides it out.
+        shortTimeout.PrepareBusy.Should().Be(0, "a prepare outside a transaction waits out a checkpoint that ends");
+        longTimeout.PrepareBusy.Should().Be(0, "a prepare outside a transaction waits out a checkpoint that ends");
+        shortTimeout.Ok.Should().BeGreaterThan(0);
+        longTimeout.Ok.Should().BeGreaterThan(0);
     }
 
-    private sealed record Result(int Ok, int Busy, double MaxFailMs, double MedianFailMs, string TopMessage);
+    [TestMethod]
+    public void A_Prepare_Waits_No_Longer_Than_The_Busy_Timeout()
+    {
+        SkipUnlessNative();
+
+        // Checkpoints back to back hold the lock nearly all the time, so a prepare often runs out its timeout.
+        // When it does, it must give up at the timeout, not wait on past it, and not fail early either.
+        var held = Measure(ShortTimeoutMs, checkpointEveryMs: 0, checkpointing: true);
+        Report($"{ShortTimeoutMs}ms + constant checkpoints", held);
+
+        if (held.PrepareBusy > 0)
+        {
+            held.MedianPrepareFailMs.Should().BeGreaterThanOrEqualTo(ShortTimeoutMs * 0.9,
+                "a prepare outside a transaction waits the busy timeout out before giving up");
+            held.MaxPrepareFailMs.Should().BeLessThan(ShortTimeoutMs + 250,
+                "the busy timeout bounds the whole prepare, retries included");
+        }
+    }
+
+    [TestMethod]
+    public void Inside_A_Transaction_A_Busy_Prepare_Still_Fails_At_Once()
+    {
+        SkipUnlessNative();
+
+        // A transaction holds a snapshot a checkpoint can make stale, and retrying on a stale snapshot spins
+        // forever (the reverted step retry in TursoRawConnection's note). So inside one, a busy prepare must
+        // surface straight away for the caller to roll back and restart.
+        // Periodic, not constant: back-to-back checkpoints leave no gap for a transaction to open or even roll
+        // back in, and the arm then measures a connection stuck in its transaction rather than prepares inside one.
+        var inTx = Measure(LongTimeoutMs, CheckpointEveryMs, checkpointing: true, inTransaction: true);
+        Report($"{LongTimeoutMs}ms + checkpoint, in a transaction", inTx);
+
+        // Typically ~20 a run. A retry inside a transaction makes it 0, so any at all shows they weren't retried.
+        inTx.PrepareBusy.Should().BeGreaterThan(0, "a busy prepare inside a transaction surfaces instead of being retried");
+        inTx.MedianPrepareFailMs.Should().BeLessThan(LongTimeoutMs / 10.0,
+            "inside a transaction a busy prepare is not retried");
+    }
+
+    private sealed record Result(
+        int Ok, int Busy, int PrepareBusy, double MaxPrepareFailMs, double MedianPrepareFailMs, string TopMessage);
 
     /// <summary>Progress to a file, because MSTest buffers a test's stdout until the method returns — which
     /// is no use when the question is where a run is getting stuck.</summary>
@@ -72,9 +107,9 @@ public class TursoBusyTimeoutTests
         }
     }
 
-    private static Result Measure(int busyTimeoutMs, bool checkpointing)
+    private static Result Measure(int busyTimeoutMs, int checkpointEveryMs, bool checkpointing, bool inTransaction = false)
     {
-        Trace($"Measure(busyTimeout={busyTimeoutMs}, checkpointing={checkpointing}) start");
+        Trace($"Measure(busyTimeout={busyTimeoutMs}, checkpointEvery={checkpointEveryMs}, checkpointing={checkpointing}, tx={inTransaction}) start");
         var dbPath = TempDb();
         try
         {
@@ -86,9 +121,9 @@ public class TursoBusyTimeoutTests
 
             var payload = new string('p', 2048);
 
-            // Every connection is opened BEFORE the load starts. Opening is itself contended (Connect now
-            // waits that out — see TursoConnectBusyTests), and letting it race here would measure the wait
-            // instead of the thing under test.
+            // Every connection is opened BEFORE the load starts. Opening is itself contended (Connect waits
+            // that out — see TursoConnectBusyTests), and letting it race here would measure the wait instead of
+            // the thing under test.
             Trace("  seeded; opening connections");
             var writerConns = Enumerable.Range(0, Writers).Select(_ => TursoRawConnection.Open(db, busyTimeoutMs)).ToArray();
             using var readerConn = TursoRawConnection.Open(db, busyTimeoutMs);
@@ -108,34 +143,59 @@ public class TursoBusyTimeoutTests
                 }
             })).ToArray();
 
-            // The measured connection: run a statement, and time the failures.
+            // The measured connection: run a statement, and time the failures at prepare. In the transaction arm
+            // each statement runs inside an open read transaction, restarted after any failure as a caller must.
             var ok = 0;
-            var failMs = new ConcurrentBag<double>();
+            var busy = 0;
+            var prepareFailMs = new ConcurrentBag<double>();
             var messages = new ConcurrentBag<string>();
             var reader = Task.Run(() =>
             {
-                while (!ct.IsCancellationRequested)
+                var open = false;
+while (!ct.IsCancellationRequested)
                 {
                     var sw = Stopwatch.StartNew();
                     try
                     {
+                        if (inTransaction && !open)
+                        {
+                            readerConn.Execute("BEGIN");
+                            open = true;
+                            sw.Restart();
+                        }
+
                         readerConn.QueryScalar("SELECT count(*) FROM t");
                         Interlocked.Increment(ref ok);
                     }
                     catch (Exception ex)
                     {
                         sw.Stop();
-                        failMs.Add(sw.Elapsed.TotalMilliseconds);
-                        messages.Add(ex.Message.Split('\n')[0]);
+                        Interlocked.Increment(ref busy);
+                        var message = ex.Message.Split('\n')[0];
+                        messages.Add(message);
+                        if (message.StartsWith("prepare_single", StringComparison.Ordinal) && (!inTransaction || open))
+                        {
+                            prepareFailMs.Add(sw.Elapsed.TotalMilliseconds);
+                        }
+
+                        if (open)
+                        {
+                            RollBack(readerConn);
+                            open = false;
+                        }
                     }
+                }
+
+                if (open)
+                {
+                    RollBack(readerConn);
                 }
             });
 
-            // Optionally, a checkpoint loop underneath — the SyncCoordinator's job. Periodic, NOT continuous:
-            // a tight loop holds the lock permanently, under which no amount of retrying can ever succeed and
-            // the only effect is to convert fast failures into slow ones. Real checkpoints are occasional
-            // (SyncCoordinator's is every 20 s), so the question worth answering is whether a statement can
-            // ride out a checkpoint that will actually end.
+            // Optionally, a checkpoint loop underneath — the job of whatever drives the sync engine. With a gap it
+            // is periodic: real checkpoints are occasional, so the question is whether a statement can ride out
+            // one that will actually end. With no gap it holds the lock nearly all the time, which is what the
+            // deadline and transaction arms need.
             var checkpointer = checkpointing
                 ? Task.Run(() =>
                 {
@@ -143,22 +203,26 @@ public class TursoBusyTimeoutTests
                     {
                         try { db.Checkpoint(); }
                         catch { /* contention is the point */ }
-                        Thread.Sleep(CheckpointEveryMs);
+                        if (checkpointEveryMs > 0)
+                        {
+                            Thread.Sleep(checkpointEveryMs);
+                        }
                     }
                 })
                 : Task.CompletedTask;
 
             Trace("  load running; waiting for drain");
             Task.WaitAll([reader, checkpointer, .. writers]);
-            Trace($"  drained: ok={ok} busy={failMs.Count}");
+            Trace($"  drained: ok={ok} busy={busy} prepareBusy={prepareFailMs.Count}");
             foreach (var c in writerConns)
             {
                 c.Dispose();
             }
 
-            var sorted = failMs.OrderBy(x => x).ToArray();
+            var sorted = prepareFailMs.OrderBy(x => x).ToArray();
             return new Result(
                 ok,
+                busy,
                 sorted.Length,
                 sorted.Length > 0 ? sorted[^1] : 0,
                 sorted.Length > 0 ? sorted[sorted.Length / 2] : 0,
@@ -170,8 +234,35 @@ public class TursoBusyTimeoutTests
         }
     }
 
+    /// <summary>
+    /// End the reader's transaction for real. Inside a transaction a busy prepare isn't retried, and that
+    /// includes ROLLBACK's own, so one attempt under constant checkpoints usually fails and leaves the
+    /// connection in its transaction. The arm then measured a connection stuck there (BEGIN refused, a million
+    /// times) instead of prepares inside a transaction.
+    /// </summary>
+    private static void RollBack(TursoRawConnection conn)
+    {
+        for (var attempt = 0; attempt < 1000; attempt++)
+        {
+            try
+            {
+                conn.Execute("ROLLBACK");
+                return;
+            }
+            catch (TursoException ex) when (ex.IsBusy || ex.IsBusySnapshot)
+            {
+                Thread.Sleep(1);
+            }
+            catch (TursoException)
+            {
+                return; // no transaction left to roll back
+            }
+        }
+    }
+
     private static void Report(string label, Result r) => Console.WriteLine(
-        $"[busy] {label,-22} ok={r.Ok,-7} busy={r.Busy,-8} median-fail={r.MedianFailMs,8:F3}ms  max-fail={r.MaxFailMs,9:F3}ms  {r.TopMessage}");
+        $"[busy] {label,-46} ok={r.Ok,-7} busy={r.Busy,-8} prepare-busy={r.PrepareBusy,-8} " +
+        $"median-prepare-fail={r.MedianPrepareFailMs,8:F3}ms  max-prepare-fail={r.MaxPrepareFailMs,9:F3}ms  {r.TopMessage}");
 
     private static void SkipUnlessNative()
     {
