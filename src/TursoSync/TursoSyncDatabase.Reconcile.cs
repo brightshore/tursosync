@@ -61,7 +61,10 @@ public sealed partial class TursoSyncDatabase
                 "ReconcileLocalTables requires a remote — a local-only database has no server to reconcile with.");
         }
 
-        var serverTables = FetchServerTables(config, options.ScratchDirectory);
+        // One SQL request over the pipeline lists the server's tables; bootstrapping a scratch replica would
+        // download the whole database to read the same names, so it is kept only for a server that will not answer.
+        var serverTables = ServerTablesOverPipeline(_http, _baseUrl, _authToken, _namespace)
+            ?? FetchServerTables(config, options.ScratchDirectory);
 
         using var connection = TursoRawConnection.Open(this);
         var local = TursoSchemaGuard.UserTables(connection);
@@ -190,37 +193,86 @@ public sealed partial class TursoSyncDatabase
     private void ExecuteRemoteSql(IReadOnlyList<string> sqls, bool idempotent)
     {
         var statements = idempotent ? sqls.Select(MakeIfNotExists).ToList() : sqls.ToList();
+        using var doc = SendPipeline(_http, _baseUrl, _authToken, _namespace, statements);
+    }
+
+    /// <summary>
+    /// POST <paramref name="sqls"/> to the remote's Hrana <c>/v2/pipeline</c> as one batch and return the parsed
+    /// response, throwing <see cref="TursoException"/> on a non-2xx status or any statement that did not succeed.
+    /// </summary>
+    private static JsonDocument SendPipeline(
+        HttpClient http, string baseUrl, string? authToken, string? ns, IReadOnlyList<string> sqls)
+    {
         var payload = JsonSerializer.Serialize(new
         {
-            requests = statements.Select(sql => (object)new { type = "execute", stmt = new { sql } }).ToArray(),
+            requests = sqls.Select(sql => (object)new { type = "execute", stmt = new { sql } }).ToArray(),
         });
 
         using var content = new StringContent(payload, Encoding.UTF8, "application/json");
-        using var message = new HttpRequestMessage(HttpMethod.Post, JoinUrl(_baseUrl, "/v2/pipeline"))
+        using var message = new HttpRequestMessage(HttpMethod.Post, JoinUrl(baseUrl, "/v2/pipeline"))
         {
             Content = content,
         };
-        if (!string.IsNullOrEmpty(_authToken))
+        if (!string.IsNullOrEmpty(authToken))
         {
-            message.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _authToken);
+            message.Headers.TryAddWithoutValidation("Authorization", "Bearer " + authToken);
         }
 
-        message.Headers.Host = BuildHost(_baseUrl, _namespace);
+        message.Headers.Host = BuildHost(baseUrl, ns);
 
-        using var response = _http.Send(message);
+        using var response = http.Send(message);
         var body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
         if (!response.IsSuccessStatusCode)
         {
             throw new TursoException($"remote pipeline: HTTP {(int)response.StatusCode}: {Truncate(body)}");
         }
 
-        using var doc = JsonDocument.Parse(body);
+        var doc = JsonDocument.Parse(body);
         foreach (var result in doc.RootElement.GetProperty("results").EnumerateArray())
         {
             if (result.GetProperty("type").GetString() != "ok")
             {
+                doc.Dispose();
                 throw new TursoException($"remote pipeline statement failed: {Truncate(body)}");
             }
+        }
+
+        return doc;
+    }
+
+    /// <summary>
+    /// The server's user tables, read with one <c>SELECT</c> over <c>/v2/pipeline</c>, under the same rule as the
+    /// local side (<see cref="TursoSchemaGuard.IsInternal"/> names left out). Null when the server cannot answer
+    /// that way (an HTTP error, a failed statement, or a response not in the Hrana shape), so the caller can fall
+    /// back to reading a bootstrapped replica.
+    /// </summary>
+    internal static List<string>? ServerTablesOverPipeline(HttpClient http, string baseUrl, string? authToken, string? ns)
+    {
+        try
+        {
+            using var doc = SendPipeline(http, baseUrl, authToken, ns,
+                ["SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"]);
+            var rows = doc.RootElement.GetProperty("results")[0]
+                .GetProperty("response").GetProperty("result").GetProperty("rows");
+            var tables = new List<string>();
+            foreach (var row in rows.EnumerateArray())
+            {
+                var cell = row[0];
+                if (cell.GetProperty("type").GetString() == "text"
+                    && cell.GetProperty("value").GetString() is { } name
+                    && !TursoSchemaGuard.IsInternal(name))
+                {
+                    tables.Add(name);
+                }
+            }
+
+            return tables;
+        }
+        catch (Exception ex) when (ex is TursoException or HttpRequestException or JsonException
+                                       or KeyNotFoundException or InvalidOperationException or IndexOutOfRangeException
+                                       or TaskCanceledException)
+        {
+            return null;
         }
     }
 
@@ -233,7 +285,8 @@ public sealed partial class TursoSyncDatabase
             "$1IF NOT EXISTS ",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
-    /// <summary>The server's user tables, read from a throwaway replica bootstrapped off the remote.</summary>
+    /// <summary>The server's user tables, read from a throwaway replica bootstrapped off the remote. This downloads
+    /// the whole database, so it is only the fallback for <see cref="ServerTablesOverPipeline"/>.</summary>
     private static List<string> FetchServerTables(TursoSyncConfig config, string? scratchDirectory)
     {
         var dir = scratchDirectory
