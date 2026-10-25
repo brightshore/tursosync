@@ -151,6 +151,17 @@ jobs:
           [ "${{ runner.os }}" = "Windows" ] && exe=".exe"
           echo "TURSOSYNC_TEST_SYNC_SERVER=${{ github.workspace }}/turso-bin/tursodb$exe" >> "$GITHUB_ENV"
 
+      # The native is built nowhere else, and an Actions cache cannot be fetched from outside a workflow, so
+      # publish the binaries as a run artifact: `gh run download <run> -n turso-bin-<OS>` puts this exact build
+      # on a dev box or a self-hosted runner for debugging a platform-only failure.
+      - name: Upload Turso binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: turso-bin-${{ runner.os }}
+          path: turso-bin
+          retention-days: 14
+          if-no-files-found: error
+
       - name: Restore
         run: dotnet restore TursoSync.slnx
 
