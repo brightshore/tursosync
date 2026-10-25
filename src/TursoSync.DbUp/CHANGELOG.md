@@ -1,5 +1,12 @@
 # TursoSync.DbUp
 
+## 1.4.4
+
+### Patch Changes
+
+- Updated dependencies
+  - TursoSync@1.4.4
+
 ## 1.4.3
 
 ### Patch Changes
