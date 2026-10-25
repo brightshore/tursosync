@@ -17,8 +17,8 @@
     <Version>1.4.2</Version>
     <Authors>John Campion Jr</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/tweeddev/tursosync</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/tweeddev/tursosync</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/brightshore/tursosync</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/brightshore/tursosync</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>turso;sqlite;libsql;sync;ado.net;database;fts</PackageTags>

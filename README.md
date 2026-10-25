@@ -160,6 +160,11 @@ The pushed tag triggers the **Release** workflow, which builds all six RID nativ
 stripped), packs, and publishes to NuGet via **trusted publishing** (OIDC — no API key). shipRig only
 versions/tags/pushes; the cross-arch native build + publish stay in CI (`.changeset/release.jsonc`).
 
+**Never run `shiprig publish` here.** It isn't in the pipeline, and `.changeset/config.json` names no package
+source, so a local publish would pack on your machine, without the six native builds CI makes, and push that to
+nuget.org. The only reason it doesn't today is that the version on disk is already published, so the push is
+skipped as a duplicate. After a local `shiprig version` it would ship a broken package.
+
 Day-to-day dev uses [rig](https://rigsmith.dev) (`.rig.json`): `rig build` / `rig test` / `rig coverage`,
 plus `rig engine <tag|latest>` (pin the engine) and `rig pack` (local Tier-0 pack + consume test).
 

@@ -13,7 +13,7 @@ Rust engine + sync + FTS with bundled natives. It was ported from `tursodatabase
 
 ## This repo
 
-- **github.com/tweeddev/tursosync** (public), `main @ 7d843f1`. Local clone for `rig`/`shiprig`: this dir.
+- **github.com/brightshore/tursosync** (public; moved from tweeddev/tursosync). Local clone for `rig`/`shiprig`: this dir.
 - **Downstream consumer:** the Tweed app (`github.com/JohnCampionJr/tweed`, private) uses these packages via
   NuGet from `Tweed.Store` — a real-world consumer + the original home (the code was extracted from there).
 
@@ -68,7 +68,9 @@ OIDC + created the GitHub Release). The earlier `0.1.0-preview.1` remains on the
     `local-pack.sh`/`scripts/bump-turso.sh` can build it.
 - **shiprig** (`.changeset/`) = releases. `config.json`: `fixed:[TursoSync,.DbUp,.Dapper]` (ship together),
   `ignore:[TursoSync.Tests]`. `release.jsonc` order = **version → commit → tag → push** (build+publish
-  delegated to CI — the local machine can't cross-build the 6 natives, and we publish via OIDC).
+  delegated to CI — the local machine can't cross-build the 6 natives, and we publish via OIDC). **Never run
+  `shiprig publish` locally:** with no package source configured it would pack here, without the natives, and
+  push to nuget.org.
 - **Cut a release:** `shiprig add` (record change+bump) → `shiprig release` → tags `TursoSync@x.y.z` + pushes
   → `release.yml` builds+publishes. For previews: `shiprig pre enter preview` first (a plain patch/minor from
   `-preview.1` resolves to `0.1.0`, dropping the prerelease).
