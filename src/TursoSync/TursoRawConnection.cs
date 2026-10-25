@@ -39,9 +39,11 @@ public sealed class TursoRawConnection : IDisposable
     //    step it invokes the handler and, if the handler says wait, converts the result to StepResult::IO and
     //    yields — so the wait is driven by the caller's IO pump, which Step() below already does. Genuine
     //    Busy during step is therefore handled correctly today.
-    //  * It is NOT consulted while preparing. A contended prepare_single returns Busy straight away, which is
-    //    why TursoBusyTimeoutTests measures a ~3 microsecond median time-to-failure whether the connection's
-    //    busy timeout is 200 ms or 5000 ms. That gap belongs in the engine's prepare path, not here.
+    //  * It is NOT consulted while preparing. A contended prepare_single returns Busy straight away: before
+    //    Prepare() retried it, TursoBusyTimeoutTests measured a ~3 microsecond median time-to-failure whether
+    //    the connection's busy timeout was 200 ms or 5000 ms. The proper home for that wait is the engine's
+    //    prepare path; until it has one, Prepare() below supplies it outside a transaction (see the end of
+    //    this note).
     //  * BusySnapshot is a DIFFERENT error and must never be retried in place. The engine is explicit:
     //    "Retrying with busy_timeout will NEVER HELP" (core/storage/wal.rs) — a checkpoint advanced the WAL,
     //    the read snapshot is permanently stale, and only rolling back and restarting the transaction gets a

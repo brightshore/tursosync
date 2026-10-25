@@ -152,7 +152,7 @@ public class TursoBusyTimeoutTests
             var reader = Task.Run(() =>
             {
                 var open = false;
-while (!ct.IsCancellationRequested)
+                while (!ct.IsCancellationRequested)
                 {
                     var sw = Stopwatch.StartNew();
                     try
