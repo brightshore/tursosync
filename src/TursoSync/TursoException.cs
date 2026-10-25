@@ -111,8 +111,10 @@ public class TursoException : Exception
     ///
     /// <para>Note the engine's busy handler covers <c>step</c> only: on a busy step it yields IO until the
     /// connection's busy timeout elapses, which the statement loop drives. It is NOT consulted while
-    /// preparing, so a contended <c>prepare</c> surfaces here immediately regardless of the timeout
-    /// configured (measured in <c>TursoBusyTimeoutTests</c>).</para>
+    /// preparing, so <see cref="TursoRawConnection.Prepare"/> gives a contended <c>prepare</c> the same wait
+    /// itself while the connection is in autocommit, and this surfaces only once the busy timeout has run out.
+    /// Inside a transaction a contended <c>prepare</c> still surfaces here immediately, whatever the timeout
+    /// (measured in <c>TursoBusyTimeoutTests</c>).</para>
     /// </summary>
     public bool IsBusy => Kind is TursoErrorKind.Busy;
 
