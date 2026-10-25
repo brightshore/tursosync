@@ -65,13 +65,16 @@ public class TursoBusyTimeoutTests
         var held = Measure(ShortTimeoutMs, checkpointEveryMs: 0, checkpointing: true);
         Report($"{ShortTimeoutMs}ms + constant checkpoints", held);
 
-        if (held.PrepareBusy > 0)
+        // No prepare ran out its timeout, so there is nothing to time: say so rather than pass.
+        if (held.PrepareBusy == 0)
         {
-            held.MedianPrepareFailMs.Should().BeGreaterThanOrEqualTo(ShortTimeoutMs * 0.9,
-                "a prepare outside a transaction waits the busy timeout out before giving up");
-            held.MaxPrepareFailMs.Should().BeLessThan(ShortTimeoutMs + 250,
-                "the busy timeout bounds the whole prepare, retries included");
+            Assert.Inconclusive("no prepare ran out its busy timeout under constant checkpoints, so the bound went unmeasured");
         }
+
+        held.MedianPrepareFailMs.Should().BeGreaterThanOrEqualTo(ShortTimeoutMs * 0.9,
+            "a prepare outside a transaction waits the busy timeout out before giving up");
+        held.MaxPrepareFailMs.Should().BeLessThan(ShortTimeoutMs + 250,
+            "the busy timeout bounds the whole prepare, retries included");
     }
 
     [TestMethod]
@@ -88,6 +91,7 @@ public class TursoBusyTimeoutTests
         Report($"{LongTimeoutMs}ms + checkpoint, in a transaction", inTx);
 
         // Typically ~20 a run. A retry inside a transaction makes it 0, so any at all shows they weren't retried.
+        // Zero is therefore the failure this test exists to catch, never an inconclusive run.
         inTx.PrepareBusy.Should().BeGreaterThan(0, "a busy prepare inside a transaction surfaces instead of being retried");
         inTx.MedianPrepareFailMs.Should().BeLessThan(LongTimeoutMs / 10.0,
             "inside a transaction a busy prepare is not retried");
