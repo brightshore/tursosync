@@ -14,7 +14,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Version>1.4.2</Version>
+    <Version>1.4.3</Version>
     <Authors>John Campion Jr</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/brightshore/tursosync</PackageProjectUrl>
