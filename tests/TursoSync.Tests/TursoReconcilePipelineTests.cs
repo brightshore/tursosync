@@ -135,9 +135,11 @@ public class TursoReconcilePipelineTests
                 ScratchDirectory = Path.Combine(dir, "scratch"),
             });
 
-            act.Should().Throw<TursoException>();
+            var thrown = act.Should().Throw<TursoException>().Which;
             server.Requests.Select(r => r.Path).Should().Contain("/v2/pipeline")
-                .And.Contain(p => p != "/v2/pipeline");
+                .And.Contain(p => p != "/v2/pipeline",
+                    "the bootstrap's request must reach the stub (the reconcile threw: {0}; the stub saw: {1})",
+                    thrown.Message, string.Join("; ", server.Requests.Select(r => $"{r.Path} {r.Body}")));
         }
         finally
         {
@@ -215,6 +217,7 @@ public class TursoReconcilePipelineTests
                 catch (Exception ex) when (ex is HttpListenerException or IOException or ObjectDisposedException)
                 {
                     // the client gave up on this request; keep serving the next one
+                    Requests.Enqueue(new Recorded(ctx.Request.Url?.AbsolutePath ?? "", null, "STUB-ERROR " + ex.GetType().Name + ": " + ex.Message));
                 }
             }
         }
