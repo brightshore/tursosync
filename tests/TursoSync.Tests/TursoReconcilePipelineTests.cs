@@ -135,9 +135,11 @@ public class TursoReconcilePipelineTests
                 ScratchDirectory = Path.Combine(dir, "scratch"),
             });
 
-            act.Should().Throw<TursoException>();
+            var thrown = act.Should().Throw<TursoException>().Which;
             server.Requests.Select(r => r.Path).Should().Contain("/v2/pipeline")
-                .And.Contain(p => p != "/v2/pipeline");
+                .And.Contain(p => p != "/v2/pipeline",
+                    "the bootstrap's request must reach the stub (the reconcile threw: {0}; the stub saw: {1})",
+                    thrown.Message, string.Join("; ", server.Requests.Select(r => $"{r.Path} {r.Body}")));
         }
         finally
         {
@@ -145,17 +147,25 @@ public class TursoReconcilePipelineTests
         }
     }
 
-    /// <summary>A loopback HTTP server that records each request and answers it from a handler keyed on the path.</summary>
+    /// <summary>
+    /// A loopback HTTP server that records each request and answers it from a handler keyed on the path. Raw
+    /// sockets, not <see cref="HttpListener"/>: on Windows that is http.sys, which rejects the sync engine's own
+    /// <c>/pull-updates</c> request with a 400 of its own before the handler sees it (the engine sends
+    /// <c>Accept-Encoding: application/protobuf</c>, a media type where a content coding belongs), so a stub on
+    /// it can never observe the bootstrap there. One request per connection, answered with <c>Connection: close</c>.
+    /// </summary>
     private sealed class PipelineStub : IDisposable
     {
-        private readonly HttpListener _listener;
+        private readonly TcpListener _listener;
         private readonly Func<string, (HttpStatusCode Status, string Body)> _respond;
 
-        private PipelineStub(HttpListener listener, int port, Func<string, (HttpStatusCode, string)> respond)
+        private PipelineStub(TcpListener listener, Func<string, (HttpStatusCode, string)> respond)
         {
             _listener = listener;
             _respond = respond;
-            BaseUrl = $"http://localhost:{port}";
+            // 127.0.0.1, not localhost: the listener is IPv4-only, and a client trying ::1 first waits out a
+            // refused connect on Windows before falling back.
+            BaseUrl = $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}";
         }
 
         public string BaseUrl { get; }
@@ -176,74 +186,89 @@ public class TursoReconcilePipelineTests
 
         public static PipelineStub Start(Func<string, (HttpStatusCode, string)> respond)
         {
-            var port = FreePort();
-            var listener = new HttpListener();
-            listener.Prefixes.Add($"http://localhost:{port}/");
+            var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
-            var server = new PipelineStub(listener, port, respond);
+            var server = new PipelineStub(listener, respond);
             _ = server.LoopAsync();
             return server;
         }
 
         private async Task LoopAsync()
         {
-            while (_listener.IsListening)
+            while (true)
             {
-                HttpListenerContext ctx;
+                TcpClient client;
                 try
                 {
-                    ctx = await _listener.GetContextAsync();
+                    client = await _listener.AcceptTcpClientAsync();
                 }
-                catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException or InvalidOperationException)
+                catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
                 {
                     return; // listener stopped
                 }
 
+                _ = ServeAsync(client);
+            }
+        }
+
+        private async Task ServeAsync(TcpClient client)
+        {
+            using (client)
+            {
                 try
                 {
-                    using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-                    var body = await reader.ReadToEndAsync();
-                    var path = ctx.Request.Url?.AbsolutePath ?? "";
-                    Requests.Enqueue(new Recorded(path, ctx.Request.Headers["Authorization"], body));
+                    var stream = client.GetStream();
+                    var head = await ReadHeadAsync(stream);
+                    if (head is null)
+                    {
+                        return; // closed before a full request
+                    }
+
+                    var lines = head.Split("\r\n");
+                    var target = lines[0].Split(' ')[1];
+                    var path = target.Split('?')[0];
+                    var headers = lines.Skip(1)
+                        .Select(l => l.Split(':', 2))
+                        .Where(kv => kv.Length == 2)
+                        .ToDictionary(kv => kv[0].Trim(), kv => kv[1].Trim(), StringComparer.OrdinalIgnoreCase);
+                    var length = headers.TryGetValue("Content-Length", out var cl) ? int.Parse(cl) : 0;
+                    var body = new byte[length];
+                    await stream.ReadExactlyAsync(body);
+
+                    Requests.Enqueue(new Recorded(path, headers.GetValueOrDefault("Authorization"), Encoding.UTF8.GetString(body)));
                     var (status, text) = _respond(path);
-                    var bytes = Encoding.UTF8.GetBytes(text);
-                    ctx.Response.StatusCode = (int)status;
-                    ctx.Response.ContentType = "application/json";
-                    await ctx.Response.OutputStream.WriteAsync(bytes);
-                    ctx.Response.Close();
+                    var payload = Encoding.UTF8.GetBytes(text);
+                    var response = Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 {(int)status} {status}\r\nContent-Type: application/json\r\n" +
+                        $"Content-Length: {payload.Length}\r\nConnection: close\r\n\r\n");
+                    await stream.WriteAsync(response);
+                    await stream.WriteAsync(payload);
                 }
-                catch (Exception ex) when (ex is HttpListenerException or IOException or ObjectDisposedException)
+                catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException)
                 {
-                    // the client gave up on this request; keep serving the next one
+                    // the client gave up on this request; the accept loop keeps serving the next one
                 }
             }
         }
 
-        public void Dispose()
+        /// <summary>The request line and headers, up to the blank line; null if the client closed first.</summary>
+        private static async Task<string?> ReadHeadAsync(NetworkStream stream)
         {
-            try
+            var head = new List<byte>();
+            var one = new byte[1];
+            while (head.Count < 4 || head[^4] != '\r' || head[^3] != '\n' || head[^2] != '\r' || head[^1] != '\n')
             {
-                _listener.Stop();
-                _listener.Close();
+                if (await stream.ReadAsync(one) == 0)
+                {
+                    return null;
+                }
+
+                head.Add(one[0]);
             }
-            catch (ObjectDisposedException)
-            {
-                // already closed
-            }
+
+            return Encoding.ASCII.GetString(head.ToArray(), 0, head.Count - 4);
         }
 
-        private static int FreePort()
-        {
-            var listener = new TcpListener(IPAddress.Loopback, 0);
-            listener.Start();
-            try
-            {
-                return ((IPEndPoint)listener.LocalEndpoint).Port;
-            }
-            finally
-            {
-                listener.Stop();
-            }
-        }
+        public void Dispose() => _listener.Stop();
     }
 }

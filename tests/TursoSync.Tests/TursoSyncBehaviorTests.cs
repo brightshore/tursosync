@@ -421,7 +421,10 @@ public class TursoSyncBehaviorTests
                 RemoteUrl = server.BaseUrl,
                 BootstrapIfEmpty = true,
             });
-            act.Should().Throw<TursoException>();
+            // The stub's own status, not merely some failure: the request must reach it and its 500 must be what
+            // surfaces (on Windows an http.sys-based stub once answered with its own 400, and this still passed).
+            act.Should().Throw<TursoException>().WithMessage("*status=500*");
+            server.Requests.Should().BePositive();
         }
         finally
         {
@@ -661,51 +664,87 @@ public class TursoSyncBehaviorTests
 
     /// <summary>
     /// A minimal loopback HTTP server that answers every request with a fixed status code, for exercising the
-    /// sync engine's error-propagation path without any real remote. Drains and closes each request.
+    /// sync engine's error-propagation path without any real remote. Raw sockets, not <see cref="HttpListener"/>:
+    /// on Windows that is http.sys, which answers the engine's <c>/pull-updates</c> with a 400 of its own (the
+    /// engine sends <c>Accept-Encoding: application/protobuf</c>), so the configured status never reached the
+    /// engine there. One request per connection, answered with <c>Connection: close</c>.
     /// </summary>
     private sealed class StubHttpServer : IDisposable
     {
-        private readonly HttpListener _listener;
+        private readonly TcpListener _listener;
         private readonly HttpStatusCode _status;
+        private int _requests;
 
-        private StubHttpServer(HttpListener listener, int port, HttpStatusCode status)
+        private StubHttpServer(TcpListener listener, HttpStatusCode status)
         {
             _listener = listener;
             _status = status;
-            BaseUrl = $"http://localhost:{port}";
+            // 127.0.0.1, not localhost: the listener is IPv4-only, and a client trying ::1 first waits out a
+            // refused connect on Windows before falling back.
+            BaseUrl = $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}";
         }
 
         public string BaseUrl { get; }
 
+        /// <summary>How many complete requests the stub has answered.</summary>
+        public int Requests => Volatile.Read(ref _requests);
+
         public static StubHttpServer Start(HttpStatusCode status)
         {
-            var port = FreePort();
-            var listener = new HttpListener();
-            listener.Prefixes.Add($"http://localhost:{port}/");
+            var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
-            var server = new StubHttpServer(listener, port, status);
+            var server = new StubHttpServer(listener, status);
             _ = server.LoopAsync();
             return server;
         }
 
         private async Task LoopAsync()
         {
-            while (_listener.IsListening)
+            while (true)
             {
-                HttpListenerContext ctx;
+                TcpClient client;
                 try
                 {
-                    ctx = await _listener.GetContextAsync();
+                    client = await _listener.AcceptTcpClientAsync();
                 }
                 catch
                 {
                     return; // listener stopped
                 }
 
+                _ = ServeAsync(client);
+            }
+        }
+
+        private async Task ServeAsync(TcpClient client)
+        {
+            using (client)
+            {
                 try
                 {
-                    ctx.Response.StatusCode = (int)_status;
-                    ctx.Response.Close();
+                    var stream = client.GetStream();
+                    var head = new List<byte>();
+                    var one = new byte[1];
+                    while (head.Count < 4 || head[^4] != '\r' || head[^3] != '\n' || head[^2] != '\r' || head[^1] != '\n')
+                    {
+                        if (await stream.ReadAsync(one) == 0)
+                        {
+                            return; // closed before a full request
+                        }
+
+                        head.Add(one[0]);
+                    }
+
+                    var length = System.Text.Encoding.ASCII.GetString(head.ToArray()).Split("\r\n")
+                        .Select(l => l.Split(':', 2))
+                        .Where(kv => kv.Length == 2 && kv[0].Trim().Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
+                        .Select(kv => int.Parse(kv[1].Trim()))
+                        .FirstOrDefault();
+                    await stream.ReadExactlyAsync(new byte[length]);
+
+                    Interlocked.Increment(ref _requests);
+                    await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 {(int)_status} {_status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"));
                 }
                 catch
                 {
@@ -714,31 +753,6 @@ public class TursoSyncBehaviorTests
             }
         }
 
-        public void Dispose()
-        {
-            try
-            {
-                _listener.Stop();
-                _listener.Close();
-            }
-            catch
-            {
-                // best-effort teardown
-            }
-        }
-
-        private static int FreePort()
-        {
-            var listener = new TcpListener(IPAddress.Loopback, 0);
-            listener.Start();
-            try
-            {
-                return ((IPEndPoint)listener.LocalEndpoint).Port;
-            }
-            finally
-            {
-                listener.Stop();
-            }
-        }
+        public void Dispose() => _listener.Stop();
     }
 }

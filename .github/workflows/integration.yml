@@ -73,7 +73,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: turso-bin
-          key: turso-bin-v1-${{ runner.os }}-${{ steps.pin.outputs.sha }}
+          key: turso-bin-v2-${{ runner.os }}-${{ steps.pin.outputs.sha }}
 
       - name: Setup Rust
         if: steps.turso-bin.outputs.cache-hit != 'true'
@@ -98,6 +98,12 @@ jobs:
       - name: Build Turso sync native (Release, FTS)
         if: steps.turso-bin.outputs.cache-hit != 'true'
         shell: bash
+        env:
+          # Link the MSVC C runtime statically, so the DLL loads on a Windows box without the VC++
+          # redistributable (it otherwise fails as "module could not be found", which reads as no native at
+          # all). Not RUSTFLAGS: that would REPLACE the engine's own `cfg(target_env = "msvc")` rustflags
+          # (--cfg=tokio_unstable, which the sync engine needs); this per-triple variable is joined with them.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
         run: |
           cargo build --manifest-path turso/Cargo.toml -p turso_sync_sdk_kit --features turso_sdk_kit/fts --release
           mkdir -p turso-bin
@@ -150,6 +156,17 @@ jobs:
           exe=""
           [ "${{ runner.os }}" = "Windows" ] && exe=".exe"
           echo "TURSOSYNC_TEST_SYNC_SERVER=${{ github.workspace }}/turso-bin/tursodb$exe" >> "$GITHUB_ENV"
+
+      # The native is built nowhere else, and an Actions cache cannot be fetched from outside a workflow, so
+      # publish the binaries as a run artifact: `gh run download <run> -n turso-bin-<OS>` puts this exact build
+      # on a dev box or a self-hosted runner for debugging a platform-only failure.
+      - name: Upload Turso binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: turso-bin-${{ runner.os }}
+          path: turso-bin
+          retention-days: 14
+          if-no-files-found: error
 
       - name: Restore
         run: dotnet restore TursoSync.slnx
