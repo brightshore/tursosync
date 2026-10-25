@@ -21,9 +21,10 @@ public class TursoReconcilePipelineTests
         using var server = PipelineStub.Start(_ => PipelineStub.Rows("lane", "sqlite_sequence", "turso_cdc", "__turso_internal", "project"));
         using var http = new HttpClient();
 
-        var tables = TursoSyncDatabase.ServerTablesOverPipeline(http, server.BaseUrl, "tok", null);
+        var tables = TursoSyncDatabase.ServerTablesOverPipeline(http, server.BaseUrl, "tok", null, out var failure);
 
         tables.Should().Equal("lane", "project");
+        failure.Should().BeNull();
         server.Requests.Should().ContainSingle();
         var request = server.Requests.Single();
         request.Path.Should().Be("/v2/pipeline");
@@ -39,7 +40,8 @@ public class TursoReconcilePipelineTests
         using var server = PipelineStub.Start(_ => (HttpStatusCode.InternalServerError, "boom"));
         using var http = new HttpClient();
 
-        TursoSyncDatabase.ServerTablesOverPipeline(http, server.BaseUrl, null, null).Should().BeNull();
+        TursoSyncDatabase.ServerTablesOverPipeline(http, server.BaseUrl, null, null, out var failure).Should().BeNull();
+        failure.Should().Contain("500");
     }
 
     [TestMethod]
@@ -49,7 +51,8 @@ public class TursoReconcilePipelineTests
             """{"baton":null,"base_url":null,"results":[{"type":"error","error":{"message":"no","code":"SQLITE_ERROR"}}]}"""));
         using var http = new HttpClient();
 
-        TursoSyncDatabase.ServerTablesOverPipeline(http, server.BaseUrl, null, null).Should().BeNull();
+        TursoSyncDatabase.ServerTablesOverPipeline(http, server.BaseUrl, null, null, out var failure).Should().BeNull();
+        failure.Should().Contain("failed");
     }
 
     [TestMethod]
@@ -58,7 +61,8 @@ public class TursoReconcilePipelineTests
         using var server = PipelineStub.Start(_ => (HttpStatusCode.OK, """{"results":[{"type":"ok"}]}"""));
         using var http = new HttpClient();
 
-        TursoSyncDatabase.ServerTablesOverPipeline(http, server.BaseUrl, null, null).Should().BeNull();
+        TursoSyncDatabase.ServerTablesOverPipeline(http, server.BaseUrl, null, null, out var failure).Should().BeNull();
+        failure.Should().Contain("KeyNotFoundException");
     }
 
     [TestMethod]
@@ -92,6 +96,7 @@ public class TursoReconcilePipelineTests
             var result = db.ReconcileLocalTables(new TursoReconcileOptions { PushAfter = false });
 
             result.RebuiltTables.Should().BeEmpty();
+            result.PipelineFallbackReason.Should().BeNull();
             server.Requests.Select(r => r.Path).Should().Equal("/v2/pipeline");
         }
         finally
