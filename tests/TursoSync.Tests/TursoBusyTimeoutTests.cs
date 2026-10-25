@@ -47,10 +47,16 @@ public class TursoBusyTimeoutTests
         noCheckpoint.Busy.Should().Be(0, "a concurrent writer alone must never fail a reader");
 
         // A checkpoint every 100 ms used to fail statements at prepare in microseconds, tens of thousands of
-        // times a run, whatever the timeout. Each checkpoint ends well inside either timeout, so a prepare that
-        // waits rides it out.
-        shortTimeout.PrepareBusy.Should().Be(0, "a prepare outside a transaction waits out a checkpoint that ends");
+        // times a run, whatever the timeout. A prepare now waits a checkpoint out. Within 5 s every checkpoint
+        // ends, so nothing fails. Within 200 ms most do, but not all: on a Windows runner a checkpoint has
+        // outlasted 200 ms (2 prepares failed there). Giving up then is right, so what the short arm checks is
+        // that a prepare that fails waited the timeout out first, never that it failed fast.
         longTimeout.PrepareBusy.Should().Be(0, "a prepare outside a transaction waits out a checkpoint that ends");
+        if (shortTimeout.PrepareBusy > 0)
+        {
+            shortTimeout.MinPrepareFailMs.Should().BeGreaterThanOrEqualTo(ShortTimeoutMs * 0.9,
+                "a prepare that gives up has waited the busy timeout out, not failed at once");
+        }
         shortTimeout.Ok.Should().BeGreaterThan(0);
         longTimeout.Ok.Should().BeGreaterThan(0);
     }
@@ -98,7 +104,8 @@ public class TursoBusyTimeoutTests
     }
 
     private sealed record Result(
-        int Ok, int Busy, int PrepareBusy, double MaxPrepareFailMs, double MedianPrepareFailMs, string TopMessage);
+        int Ok, int Busy, int PrepareBusy, double MinPrepareFailMs, double MaxPrepareFailMs, double MedianPrepareFailMs,
+        string TopMessage);
 
     /// <summary>Progress to a file, because MSTest buffers a test's stdout until the method returns — which
     /// is no use when the question is where a run is getting stuck.</summary>
@@ -228,6 +235,7 @@ public class TursoBusyTimeoutTests
                 ok,
                 busy,
                 sorted.Length,
+                sorted.Length > 0 ? sorted[0] : 0,
                 sorted.Length > 0 ? sorted[^1] : 0,
                 sorted.Length > 0 ? sorted[sorted.Length / 2] : 0,
                 messages.GroupBy(m => m).OrderByDescending(g => g.Count()).FirstOrDefault()?.Key ?? "(none)");
