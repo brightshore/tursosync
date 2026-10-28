@@ -247,7 +247,173 @@ public class LiveSyncIntegrationTests
         }
     }
 
+    /// <summary>
+    /// A pull on a slow link holds the sync engine for its whole download, and a new connection waits for it to end.
+    /// Connections warmed beforehand are rented from the pool instead, and their statements run during the download.
+    /// The server's responses are throttled through a proxy so the pull is genuinely in progress while the test opens.
+    /// </summary>
+    [TestMethod]
+    public async Task LiveSync_WarmedPool_Opens_During_A_Slow_Pull()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE big (x TEXT)", "INSERT INTO big VALUES ('seed')");
+        using var proxy = new ThrottlingProxy(new Uri(server.BaseUrl).Port);
+
+        var dbPath = TempDb();
+        var connString = $"Data Source={dbPath};Remote Url={proxy.BaseUrl};Bootstrap=true;Max Idle Connections=4";
+        try
+        {
+            TursoConnection.WarmPool(connString, 4).Should().Be(4);
+            TursoSyncDatabase db;
+            using (var first = new TursoConnection(connString))
+            {
+                first.Open();
+                db = first.SyncDatabase!;
+            }
+
+            // About 1 MB of remote changes, sent back at 150 KB/s: a pull of several seconds.
+            server.ExecRemote(Enumerable.Range(0, 200).Select(_ => "INSERT INTO big VALUES (hex(randomblob(2500)))").ToArray());
+            proxy.BytesPerSecond = 150_000;
+            var pull = Task.Run(db.Pull);
+            await WaitUntil(() => proxy.SentToClient > 50_000, TimeSpan.FromSeconds(20));
+
+            var held = new List<TursoConnection>();
+            try
+            {
+                var watch = Stopwatch.StartNew();
+                for (var i = 0; i < 4; i++)
+                {
+                    var c = new TursoConnection(connString);
+                    held.Add(c);
+                    c.Open();
+                    using var cmd = c.CreateCommand();
+                    cmd.CommandText = "SELECT count(*) FROM big";
+                    cmd.ExecuteScalar().Should().Be(1L, "the pull has not applied yet");
+                }
+
+                pull.IsCompleted.Should().BeFalse("the opens must have happened during the download for this to mean anything");
+                watch.ElapsedMilliseconds.Should().BeLessThan(1000, "a warmed connection does not wait for the pull");
+
+                using var cold = new TursoConnection(connString);
+                var opening = cold.OpenAsync();
+                await Task.Delay(500);
+                var opened = opening.IsCompleted;   // read before the pull, so a pull ending in between can't fail this
+                if (opened)
+                {
+                    pull.IsCompleted.Should().BeTrue("a fifth, cold open waits for the pull to end");
+                }
+                await opening.WaitAsync(TimeSpan.FromSeconds(45));
+            }
+            finally
+            {
+                foreach (var c in held)
+                {
+                    c.Dispose();
+                }
+            }
+
+            (await pull.WaitAsync(TimeSpan.FromSeconds(45))).Should().BeTrue();
+        }
+        finally
+        {
+            TursoConnection.ClearPool();
+            Cleanup(dbPath);
+        }
+    }
+
     // ---- harness ---------------------------------------------------------------------------------
+
+    private static async Task WaitUntil(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (!condition())
+        {
+            deadline.Elapsed.Should().BeLessThan(timeout, "the condition should have come true");
+            await Task.Delay(20);
+        }
+    }
+
+    /// <summary>A TCP proxy in front of the sync server whose responses can be throttled, to make a pull slow.</summary>
+    private sealed class ThrottlingProxy : IDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly int _targetPort;
+        private readonly CancellationTokenSource _cts = new();
+        private long _sentToClient;
+
+        public ThrottlingProxy(int targetPort)
+        {
+            _targetPort = targetPort;
+            _listener.Start();
+            _ = AcceptLoopAsync();
+        }
+
+        public string BaseUrl => $"http://localhost:{((IPEndPoint)_listener.LocalEndpoint).Port}";
+
+        /// <summary>The server-to-client rate; 0 is unthrottled.</summary>
+        public volatile int BytesPerSecond;
+
+        public long SentToClient => Interlocked.Read(ref _sentToClient);
+
+        private async Task AcceptLoopAsync()
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                TcpClient client;
+                try
+                {
+                    client = await _listener.AcceptTcpClientAsync(_cts.Token);
+                }
+                catch
+                {
+                    return; // stopping
+                }
+
+                _ = RelayAsync(client);
+            }
+        }
+
+        private async Task RelayAsync(TcpClient client)
+        {
+            using (client)
+            using (var upstream = new TcpClient())
+            {
+                try
+                {
+                    await upstream.ConnectAsync(IPAddress.Loopback, _targetPort);
+                    var toServer = client.GetStream().CopyToAsync(upstream.GetStream(), _cts.Token);
+                    var toClient = CopyThrottledAsync(upstream.GetStream(), client.GetStream());
+                    await Task.WhenAny(toServer, toClient);
+                }
+                catch
+                {
+                    // a connection the client or the test tore down
+                }
+            }
+        }
+
+        private async Task CopyThrottledAsync(Stream from, Stream to)
+        {
+            var buffer = new byte[8192];
+            int read;
+            while ((read = await from.ReadAsync(buffer, _cts.Token)) > 0)
+            {
+                if (BytesPerSecond is > 0 and var rate)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds((double)read / rate), _cts.Token);
+                }
+
+                await to.WriteAsync(buffer.AsMemory(0, read), _cts.Token);
+                Interlocked.Add(ref _sentToClient, read);
+            }
+        }
+
+        public void Dispose()
+        {
+            _cts.Cancel();
+            _listener.Stop();
+        }
+    }
 
     private static TursoSyncConfig SyncConfig(string path, LocalSyncServer server) =>
         new() { Path = path, RemoteUrl = server.BaseUrl, BootstrapIfEmpty = true };
