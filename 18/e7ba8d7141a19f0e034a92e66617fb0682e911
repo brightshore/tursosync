@@ -1,0 +1,23 @@
+tests/TursoSync.Tests/LiveSyncIntegrationTests.cs
+  s_23c24b99852ce2::t_04290964be6b54 300-303
+tests/TursoSync.Tests/TursoWarmPoolTests.cs
+  s_23c24b99852ce2::t_8809bfc9644a85 65
+src/TursoSync/TursoConnection.cs
+  s_23c24b99852ce2::t_845bf3d0a012fa 74-76,80-87,89-90,94,99-101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "18e7ba8d7141a19f0e034a92e66617fb0682e911",
+  "prompts": {},
+  "sessions": {
+    "s_23c24b99852ce2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be0b01d2-19cc-48e8-a59a-2d005cf8d333",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
