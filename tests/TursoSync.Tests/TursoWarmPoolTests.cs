@@ -62,6 +62,7 @@ public class TursoWarmPoolTests
 
         TursoConnection.WarmPool(fx.ConnString, 10).Should().Be(3, "the pool would drop anything returned beyond Max Idle Connections");
         TursoConnection.WarmPool(fx.ConnString, 2).Should().Be(3, "the idle ones are reused, not added to");
+        TursoConnection.WarmPool(fx.ConnString, 0).Should().Be(3, "a count of zero still reports what is there");
     }
 
     [TestMethod]
