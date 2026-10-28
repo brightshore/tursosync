@@ -71,23 +71,34 @@ public sealed class TursoConnection : DbConnection
     public static void ClearPool() => TursoConnectionPool.Clear();
 
     /// <summary>
-    /// Leave up to <paramref name="count"/> idle connections in the pool for <paramref name="connectionString"/>,
-    /// opening whatever it lacks. Capped at the string's <c>Max Idle Connections</c>, since the pool drops any
-    /// connection returned beyond that.
+    /// Make sure the pool for <paramref name="connectionString"/> holds at least <paramref name="count"/> idle
+    /// connections, opening whatever it lacks. Capped at the string's <c>Max Idle Connections</c>, since the pool
+    /// drops any connection returned beyond that. Idle connections already there are reused, never trimmed.
     ///
     /// <para>Call it before a pull you expect to be slow. A pull holds the sync engine for its whole download, and
     /// a NEW connection cannot be made until it ends (the native engine's connect takes the same lock), while
-    /// renting an idle one needs nothing from the engine and its statements run during the download. Measured
-    /// against a sync server throttled to 150 KB/s: during a 14 s pull, four warm opens and their queries each took
-    /// under a millisecond, and a fifth, cold open waited 12.4 s for the pull to end.</para>
+    /// renting an idle one needs nothing from the engine. Measured against a sync server throttled to 150 KB/s:
+    /// during a 14 s pull, four warm opens and their queries each took under a millisecond, and a fifth, cold open
+    /// waited 12.4 s for the pull to end.</para>
+    ///
+    /// <para>Two limits. It blocks while it opens what the pool lacks, and an open that has to connect waits for a
+    /// pull already in progress, so call it before the pull starts and off the UI thread. And a statement that
+    /// needs disk IO on a warmed connection serves it from the sync engine's IO queue, which the pull's download
+    /// also uses; the measured queries never did, but a heavy one may wait on part of the download.</para>
     /// </summary>
-    /// <returns>How many idle connections the pool holds for this connection string afterwards.</returns>
+    /// <returns>How many idle connections a rent with this connection string can take afterwards: 0 when
+    /// <c>Pooling</c> is off, since such a connection never rents.</returns>
     public static int WarmPool(string connectionString, int count)
     {
         var options = new TursoConnectionStringBuilder(connectionString);
-        if (!options.Pooling || count <= 0)
+        if (!options.Pooling)
         {
             return 0;
+        }
+
+        if (count <= 0)
+        {
+            return TursoConnectionPool.IdleCount(options.PoolKey);
         }
 
         var maxIdle = options.MaxIdleConnections > 0 ? options.MaxIdleConnections : TursoConnectionPool.DefaultMaxIdlePerKey;

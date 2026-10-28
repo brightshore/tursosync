@@ -297,11 +297,10 @@ public class LiveSyncIntegrationTests
                 using var cold = new TursoConnection(connString);
                 var opening = cold.OpenAsync();
                 await Task.Delay(500);
-                var opened = opening.IsCompleted;   // read before the pull, so a pull ending in between can't fail this
-                if (opened)
-                {
-                    pull.IsCompleted.Should().BeTrue("a fifth, cold open waits for the pull to end");
-                }
+                var opened = opening.IsCompleted;
+                // Read AFTER the open's status: a pull still running now was running when that status was read.
+                pull.IsCompleted.Should().BeFalse("the cold open must be checked while the download is still running");
+                opened.Should().BeFalse("a fifth, cold open waits for the pull to end");
                 await opening.WaitAsync(TimeSpan.FromSeconds(45));
             }
             finally
