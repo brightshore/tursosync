@@ -73,6 +73,9 @@ internal static class TursoConnectionPool
         queue.Enqueue(physical);
     }
 
+    /// <summary>How many idle connections the pool holds for <paramref name="key"/>.</summary>
+    public static int IdleCount(string key) => Pools.TryGetValue(key, out var queue) ? queue.Count : 0;
+
     /// <summary>Dispose and drop all pooled connections (test isolation / shutdown).</summary>
     public static void Clear()
     {

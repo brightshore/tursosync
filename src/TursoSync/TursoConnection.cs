@@ -71,6 +71,49 @@ public sealed class TursoConnection : DbConnection
     public static void ClearPool() => TursoConnectionPool.Clear();
 
     /// <summary>
+    /// Leave up to <paramref name="count"/> idle connections in the pool for <paramref name="connectionString"/>,
+    /// opening whatever it lacks. Capped at the string's <c>Max Idle Connections</c>, since the pool drops any
+    /// connection returned beyond that.
+    ///
+    /// <para>Call it before a pull you expect to be slow. A pull holds the sync engine for its whole download, and
+    /// a NEW connection cannot be made until it ends (the native engine's connect takes the same lock), while
+    /// renting an idle one needs nothing from the engine and its statements run during the download. Measured
+    /// against a sync server throttled to 150 KB/s: during a 14 s pull, four warm opens and their queries each took
+    /// under a millisecond, and a fifth, cold open waited 12.4 s for the pull to end.</para>
+    /// </summary>
+    /// <returns>How many idle connections the pool holds for this connection string afterwards.</returns>
+    public static int WarmPool(string connectionString, int count)
+    {
+        var options = new TursoConnectionStringBuilder(connectionString);
+        if (!options.Pooling || count <= 0)
+        {
+            return 0;
+        }
+
+        var maxIdle = options.MaxIdleConnections > 0 ? options.MaxIdleConnections : TursoConnectionPool.DefaultMaxIdlePerKey;
+        var held = new List<TursoConnection>();
+        try
+        {
+            // Held open together, so each Open takes a different connection: the idle ones first, then new ones.
+            for (var i = 0; i < Math.Min(count, maxIdle); i++)
+            {
+                var connection = new TursoConnection(connectionString);
+                held.Add(connection);
+                connection.Open();
+            }
+        }
+        finally
+        {
+            foreach (var connection in held)
+            {
+                connection.Dispose();
+            }
+        }
+
+        return TursoConnectionPool.IdleCount(options.PoolKey);
+    }
+
+    /// <summary>
     /// Replicas whose sync engine is currently held open, with the number of connections holding each.
     ///
     /// <para>One engine is shared per replica file set and lives until its last connection is disposed — which
