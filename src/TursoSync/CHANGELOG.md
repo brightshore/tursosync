@@ -1,5 +1,11 @@
 # TursoSync
 
+## 1.8.0
+
+### 🚀 Enhancements
+
+- Add opt-in credential-safe sync HTTP diagnostics callbacks with transport timings, byte counts and failure phases
+
 ## 1.7.0
 
 ### 🚀 Enhancements
