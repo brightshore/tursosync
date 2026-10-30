@@ -64,7 +64,7 @@ public sealed partial class TursoSyncDatabase : IDisposable
         TursoSyncStateGuard.Validate(config.Path);
 
         var baseUrl = NormalizeUrl(config.RemoteUrl ?? "");
-        var http = new HttpClient();
+        var http = new HttpClient { Timeout = config.EffectiveHttpTimeout };
 
         // Schema guard, pre-open: snapshot the existing replica's user tables BEFORE the sync engine touches
         // the file — opening an existing replica against a remote can revert/reconcile local state, and a
@@ -128,31 +128,39 @@ public sealed partial class TursoSyncDatabase : IDisposable
     /// that landed while a checkpoint held the lock failed outright with <c>database tape error: database is
     /// busy</c> (TursoConnectBusyTests). Unlike the statement retry reverted in TursoRawConnection, each attempt
     /// here is a fresh connection with no snapshot to go stale, so retrying it is sound.</para>
+    ///
+    /// <para>Time spent waiting for the database's gate is not charged to the busy timeout. A push or pull holds
+    /// the gate for its whole round trip, so a connect could wait far longer than its timeout before its first
+    /// attempt; when the deadline counted from before that wait, the first lock collision afterwards failed at
+    /// once with <c>database is busy</c>. The timeout bounds lock contention, which is what it is for.</para>
     /// </summary>
     public IntPtr Connect(int busyTimeoutMs)
     {
         var timeout = busyTimeoutMs == 0 ? 5000 : busyTimeoutMs;
-        var deadline = Environment.TickCount64 + Math.Max(0, timeout);
+        var deadline = Clock() + Math.Max(0, timeout);
         var backoffMs = 1;
         while (true)
         {
+            long gateWaitMs = 0;
             try
             {
-                return ConnectOnce(timeout);
+                return ConnectOnce(timeout, ref gateWaitMs);
             }
             catch (TursoException ex) when (ex.IsBusy || ex.IsBusySnapshot)
             {
+                deadline += gateWaitMs;
+
                 // Never sleep past the deadline, and never attempt once it has passed: the busy timeout is a
                 // bound on the whole connect, not on when the last attempt may start.
-                var remaining = deadline - Environment.TickCount64;
+                var remaining = deadline - Clock();
                 if (remaining <= 0)
                 {
                     throw;
                 }
 
                 // Outside the gate, so whatever holds the lock (a checkpoint, a push) can finish meanwhile.
-                Thread.Sleep((int)Math.Min(backoffMs, remaining));
-                if (Environment.TickCount64 >= deadline)
+                Sleep((int)Math.Min(backoffMs, remaining));
+                if (Clock() >= deadline)
                 {
                     throw;
                 }
@@ -162,11 +170,24 @@ public sealed partial class TursoSyncDatabase : IDisposable
         }
     }
 
-    private IntPtr ConnectOnce(int timeout)
+    /// <summary>The clock <see cref="Connect"/> measures its busy timeout with, in milliseconds. Tests replace it.</summary>
+    internal Func<long> Clock { get; set; } = static () => Environment.TickCount64;
+
+    /// <summary>How <see cref="Connect"/> backs off between attempts. Tests replace it along with <see cref="Clock"/>.</summary>
+    internal Action<int> Sleep { get; set; } = Thread.Sleep;
+
+    /// <summary>Runs inside the gate just before each native connect attempt. A test seam: throwing a busy
+    /// <see cref="TursoException"/> from it stands in for a lock collision.</summary>
+    internal Action? ConnectAttemptStarting { get; set; }
+
+    private IntPtr ConnectOnce(int timeout, ref long gateWaitMs)
     {
+        var waitStart = Clock();
         lock (_gate)
         {
+            gateWaitMs = Clock() - waitStart;
             ThrowIfDisposed();
+            ConnectAttemptStarting?.Invoke();
             var op = Begin(TursoNative.SyncDatabaseConnect, "sync_database_connect");
             try
             {
@@ -466,11 +487,18 @@ public sealed partial class TursoSyncDatabase : IDisposable
                 _authToken,
                 BuildHost(_baseUrl, _namespace));
 
+            // HttpClient.Timeout covers the wait for the response headers only (ResponseHeadersRead), so the body
+            // gets the same bound per read: a download that stops arriving fails rather than hanging.
             using var response = _http.Send(message, HttpCompletionOption.ResponseHeadersRead);
             TursoNative.SyncIoStatus(item, (int)response.StatusCode);
 
             using var stream = response.Content.ReadAsStream();
-            PumpStream(item, stream);
+            PumpStream(item, new IdleTimeoutStream(stream, _http.Timeout));
+            TursoNative.SyncIoDone(item);
+        }
+        catch (Exception ex) when (IsHttpTimeout(ex))
+        {
+            Poison(item, $"sync request timed out: no response from the server within {_http.Timeout.TotalMilliseconds:0} ms (Http Timeout)");
             TursoNative.SyncIoDone(item);
         }
         catch (Exception ex)
@@ -478,6 +506,42 @@ public sealed partial class TursoSyncDatabase : IDisposable
             Poison(item, ex.Message);
             TursoNative.SyncIoDone(item);
         }
+    }
+
+    private static bool IsHttpTimeout(Exception ex) =>
+        ex is TimeoutException || (ex is TaskCanceledException && ex.InnerException is TimeoutException);
+
+    /// <summary>A read-only view of a response stream whose every read fails with <see cref="TimeoutException"/> once it
+    /// has waited <c>timeout</c> for data.</summary>
+    private sealed class IdleTimeoutStream(Stream inner, TimeSpan timeout) : Stream
+    {
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (timeout == Timeout.InfiniteTimeSpan)
+            {
+                return inner.Read(buffer, offset, count);
+            }
+
+            using var cts = new CancellationTokenSource(timeout);
+            try
+            {
+                return inner.ReadAsync(buffer.AsMemory(offset, count), cts.Token).AsTask().GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+                throw new TimeoutException("the response body stopped arriving");
+            }
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private void HandleFullRead(IntPtr item)
