@@ -228,6 +228,9 @@ public sealed class TursoConnection : DbConnection
     /// sync engine's shared IO queue) or on a busy lock, and disposing a dead connection takes a lock that is held while
     /// a replica's engine is created. A connection that died while idle fails the caller's first statement instead,
     /// as one that dies just after a probe would.</para>
+    ///
+    /// <para>The guarantee covers opening only. Closing the connection returns it to the pool as any other close does,
+    /// which probes it and disposes it if the probe fails, and that can wait.</para>
     /// </summary>
     public bool TryOpenIdle()
     {
