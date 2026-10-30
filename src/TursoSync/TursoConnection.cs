@@ -223,13 +223,16 @@ public sealed class TursoConnection : DbConnection
     /// and checking <see cref="WarmPool"/>'s idle count first does not help: another opener can take the last idle
     /// connection between the check and the open. The rent here is one atomic take from the pool.</para>
     ///
-    /// <para>A connection that has sat idle for a while is probed with a trivial query before it is handed out, as
-    /// every rent does; a probe that finds it unusable disposes it and tries the next one.</para>
+    /// <para>Unlike every other rent, it hands the idle connection over without the health probe a long-idle one
+    /// otherwise gets, and never disposes one: the probe is a statement, which can wait on the network (it drives the
+    /// sync engine's shared IO queue) or on a busy lock, and disposing a dead connection takes a lock that is held while
+    /// a replica's engine is created. A connection that died while idle fails the caller's first statement instead,
+    /// as one that dies just after a probe would.</para>
     /// </summary>
     public bool TryOpenIdle()
     {
         ThrowIfCannotOpen();
-        if (RentIdle() is not { } idle)
+        if (!_options.Pooling || TursoConnectionPool.TakeIdle(_options.PoolKey) is not { } idle)
         {
             return false;
         }

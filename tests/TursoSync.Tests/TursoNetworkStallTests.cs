@@ -166,6 +166,134 @@ public class TursoNetworkStallTests
         }
     }
 
+    /// <summary>A connection idle long enough that an ordinary rent would probe it is handed over unprobed: the probe is a
+    /// statement, and a statement can end up waiting on the stuck push (it drives the engine's shared IO queue) or on
+    /// a busy lock. The probe here stands in for one that does, and blocks until the test ends.</summary>
+    [TestMethod]
+    public async Task TryOpenIdle_Hands_Over_A_Long_Idle_Connection_Without_Probing_It_While_A_Push_Is_Stuck()
+    {
+        using var probeStuck = new ManualResetEventSlim();
+        var probed = 0;
+        try
+        {
+            await WithStuckPushAsync(
+                probe: _ =>
+                {
+                    Interlocked.Increment(ref probed);
+                    probeStuck.Wait();
+                    return true;
+                },
+                async (cs, push) =>
+                {
+                    var work = Task.Factory.StartNew(() =>
+                    {
+                        using var idle = new TursoConnection(cs);
+                        return idle.TryOpenIdle();
+                    }, TaskCreationOptions.LongRunning);
+
+                    (await Task.WhenAny(work, push, Task.Delay(StuckAfter))).Should().BeSameAs(work,
+                        "handing over an idle connection runs no statement, so nothing the push holds can stop it");
+                    (await work).Should().BeTrue();
+                    Volatile.Read(ref probed).Should().Be(0);
+                });
+        }
+        finally
+        {
+            probeStuck.Set(); // a probe stuck in a failing run must not outlive it
+        }
+    }
+
+    /// <summary>A connection a probe would find dead is not disposed on the way out: disposing it releases the sync
+    /// engine through the engine cache's lock, which is held while a replica's engine is created, a bootstrap download
+    /// included. The test holds that lock throughout.</summary>
+    [TestMethod]
+    public async Task TryOpenIdle_Never_Retires_A_Connection_Under_The_Engine_Cache_Lock_While_A_Push_Is_Stuck()
+    {
+        await WithStuckPushAsync(
+            probe: _ => false,
+            async (cs, push) =>
+            {
+                using var held = new ManualResetEventSlim();
+                using var release = new ManualResetEventSlim();
+                var holder = new Thread(() =>
+                {
+                    lock (TursoSyncDatabaseCache.Gate)
+                    {
+                        held.Set();
+                        release.Wait();
+                    }
+                }) { IsBackground = true };
+                holder.Start();
+                held.Wait();
+                try
+                {
+                    var work = Task.Factory.StartNew(() =>
+                    {
+                        using var idle = new TursoConnection(cs);
+                        var opened = idle.TryOpenIdle();
+                        idle.Close(); // back to the pool, not released: nothing here takes the cache lock either
+                        return opened;
+                    }, TaskCreationOptions.LongRunning);
+
+                    (await Task.WhenAny(work, push, Task.Delay(StuckAfter))).Should().BeSameAs(work,
+                        "TryOpenIdle disposes nothing, so it never needs the engine cache's lock");
+                    (await work).Should().BeTrue("the connection is handed over; a dead one would fail its first statement");
+                }
+                finally
+                {
+                    release.Set();
+                    holder.Join();
+                }
+            });
+    }
+
+    /// <summary>Run <paramref name="body"/> against a replica with one connection idle for a minute (on the pool's
+    /// clock, not the wall's) and a push stuck on a remote that never answers, with <paramref name="probe"/> standing in
+    /// for the pool's health probe.</summary>
+    private static async Task WithStuckPushAsync(Func<TursoPhysicalConnection, bool> probe, Func<string, Task, Task> body)
+    {
+        if (!TursoNativeLibrary.IsAvailable())
+        {
+            Assert.Inconclusive("turso_sync_sdk_kit native library not found");
+        }
+
+        var now = 0L;
+        TursoConnectionPool.Clock = () => Volatile.Read(ref now);
+        using var remote = HungRemote.Start();
+        var dir = Directory.CreateTempSubdirectory("tursosync-stall-");
+        var cs = $"Data Source={Path.Combine(dir.FullName, "store.db")};Remote Url={remote.BaseUrl};Bootstrap=false;Schema Guard=Off";
+        var pusher = new TursoConnection(cs + ";Pooling=false");
+        try
+        {
+            using (var seed = new TursoConnection(cs))
+            {
+                seed.Open();
+                seed.ExecuteNonQuery("CREATE TABLE t (x INTEGER PRIMARY KEY)");
+                seed.ExecuteNonQuery("INSERT INTO t VALUES (1)");
+            } // back to the pool at 0 ms
+
+            pusher.Open();
+            var push = Task.Factory.StartNew(() => pusher.SyncDatabase!.Push(), TaskCreationOptions.LongRunning);
+            (await remote.FirstRequest.WaitAsync(StuckAfter)).Should().StartWith("POST", "the push has to be on the network for this to test anything");
+
+            Volatile.Write(ref now, 60_000); // idle for a minute: an ordinary rent would probe it
+            TursoConnectionPool.Probe = probe;
+            await body(cs, push);
+            push.IsCompleted.Should().BeFalse("the remote never answered, so the push is still waiting");
+
+            remote.Dispose(); // drop the connection, so the push fails and the replica can close
+            await push.ContinueWith(_ => { });
+        }
+        finally
+        {
+            TursoConnectionPool.Probe = static pooled => pooled.IsUsable();
+            TursoConnectionPool.Clock = static () => Environment.TickCount64;
+            pusher.Dispose();
+            TursoConnection.ClearPool();
+            try { dir.Delete(recursive: true); } catch { /* temp */ }
+        }
+    }
+
     [TestMethod]
     public void TryOpenIdle_Says_No_When_Pooling_Is_Off()
     {
