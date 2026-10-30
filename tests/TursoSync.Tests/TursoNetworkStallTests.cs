@@ -261,14 +261,16 @@ public class TursoNetworkStallTests
         }
 
         var now = 0L;
-        TursoConnectionPool.Clock = () => Volatile.Read(ref now);
         using var remote = HungRemote.Start();
         var dir = Directory.CreateTempSubdirectory("tursosync-stall-");
         var cs = $"Data Source={Path.Combine(dir.FullName, "store.db")};Remote Url={remote.BaseUrl};Bootstrap=false;Schema Guard=Off";
         var pusher = new TursoConnection(cs + ";Pooling=false");
         var opened = new System.Collections.Concurrent.ConcurrentQueue<TursoConnection>();
+        Task? push = null;
         try
         {
+            // Inside the try, so the finally always puts the real clock back for the tests that run after this one.
+            TursoConnectionPool.Clock = () => Volatile.Read(ref now);
             using (var seed = new TursoConnection(cs))
             {
                 seed.Open();
@@ -277,7 +279,7 @@ public class TursoNetworkStallTests
             } // back to the pool at 0 ms
 
             pusher.Open();
-            var push = Task.Factory.StartNew(() => pusher.SyncDatabase!.Push(), TaskCreationOptions.LongRunning);
+            push = Task.Factory.StartNew(() => pusher.SyncDatabase!.Push(), TaskCreationOptions.LongRunning);
             (await remote.FirstRequest.WaitAsync(StuckAfter)).Should().StartWith("POST", "the push has to be on the network for this to test anything");
 
             Volatile.Write(ref now, 60_000); // idle for a minute: an ordinary rent would probe it
@@ -290,13 +292,22 @@ public class TursoNetworkStallTests
         }
         finally
         {
+            TursoConnectionPool.Probe = static pooled => pooled.IsUsable();
+            TursoConnectionPool.Clock = static () => Environment.TickCount64;
+
+            // A body that failed mid-way leaves the push stuck. End it before closing anything: a close returns the
+            // connection through the pool's real health probe, which can wait on that push and hang the run.
+            remote.Dispose();
+            if (push is not null)
+            {
+                await push.ContinueWith(_ => { });
+            }
+
             while (opened.TryDequeue(out var conn))
             {
                 conn.Dispose();
             }
 
-            TursoConnectionPool.Probe = static pooled => pooled.IsUsable();
-            TursoConnectionPool.Clock = static () => Environment.TickCount64;
             pusher.Dispose();
             TursoConnection.ClearPool();
             try { dir.Delete(recursive: true); } catch { /* temp */ }
