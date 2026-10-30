@@ -183,11 +183,12 @@ public class TursoNetworkStallTests
                     probeStuck.Wait();
                     return true;
                 },
-                async (cs, push) =>
+                async (cs, push, closeLater) =>
                 {
                     var work = Task.Factory.StartNew(() =>
                     {
-                        using var idle = new TursoConnection(cs);
+                        var idle = new TursoConnection(cs);
+                        closeLater(idle);
                         return idle.TryOpenIdle();
                     }, TaskCreationOptions.LongRunning);
 
@@ -211,7 +212,7 @@ public class TursoNetworkStallTests
     {
         await WithStuckPushAsync(
             probe: _ => false,
-            async (cs, push) =>
+            async (cs, push, closeLater) =>
             {
                 using var held = new ManualResetEventSlim();
                 using var release = new ManualResetEventSlim();
@@ -229,10 +230,9 @@ public class TursoNetworkStallTests
                 {
                     var work = Task.Factory.StartNew(() =>
                     {
-                        using var idle = new TursoConnection(cs);
-                        var opened = idle.TryOpenIdle();
-                        idle.Close(); // back to the pool, not released: nothing here takes the cache lock either
-                        return opened;
+                        var idle = new TursoConnection(cs);
+                        closeLater(idle);
+                        return idle.TryOpenIdle();
                     }, TaskCreationOptions.LongRunning);
 
                     (await Task.WhenAny(work, push, Task.Delay(StuckAfter))).Should().BeSameAs(work,
@@ -249,8 +249,11 @@ public class TursoNetworkStallTests
 
     /// <summary>Run <paramref name="body"/> against a replica with one connection idle for a minute (on the pool's
     /// clock, not the wall's) and a push stuck on a remote that never answers, with <paramref name="probe"/> standing in
-    /// for the pool's health probe.</summary>
-    private static async Task WithStuckPushAsync(Func<TursoPhysicalConnection, bool> probe, Func<string, Task, Task> body)
+    /// for the pool's health probe. Connections handed to the body's <c>closeLater</c> are closed only once the push has
+    /// ended: closing returns a connection through the pool's real health probe, which can itself wait on a stuck push,
+    /// and the tests are about opening alone.</summary>
+    private static async Task WithStuckPushAsync(
+        Func<TursoPhysicalConnection, bool> probe, Func<string, Task, Action<TursoConnection>, Task> body)
     {
         if (!TursoNativeLibrary.IsAvailable())
         {
@@ -263,6 +266,7 @@ public class TursoNetworkStallTests
         var dir = Directory.CreateTempSubdirectory("tursosync-stall-");
         var cs = $"Data Source={Path.Combine(dir.FullName, "store.db")};Remote Url={remote.BaseUrl};Bootstrap=false;Schema Guard=Off";
         var pusher = new TursoConnection(cs + ";Pooling=false");
+        var opened = new System.Collections.Concurrent.ConcurrentQueue<TursoConnection>();
         try
         {
             using (var seed = new TursoConnection(cs))
@@ -278,7 +282,7 @@ public class TursoNetworkStallTests
 
             Volatile.Write(ref now, 60_000); // idle for a minute: an ordinary rent would probe it
             TursoConnectionPool.Probe = probe;
-            await body(cs, push);
+            await body(cs, push, opened.Enqueue);
             push.IsCompleted.Should().BeFalse("the remote never answered, so the push is still waiting");
 
             remote.Dispose(); // drop the connection, so the push fails and the replica can close
@@ -286,6 +290,11 @@ public class TursoNetworkStallTests
         }
         finally
         {
+            while (opened.TryDequeue(out var conn))
+            {
+                conn.Dispose();
+            }
+
             TursoConnectionPool.Probe = static pooled => pooled.IsUsable();
             TursoConnectionPool.Clock = static () => Environment.TickCount64;
             pusher.Dispose();
