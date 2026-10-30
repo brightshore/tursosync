@@ -67,6 +67,41 @@ public sealed record TursoSyncConfig
     /// <summary>Long-poll timeout (ms) the server holds a pull open waiting for changes; 0 = off.</summary>
     public int LongPollTimeoutMs { get; init; }
 
+    /// <summary>The <see cref="HttpTimeoutMs"/> used when it is 0: one minute.</summary>
+    public const int DefaultHttpTimeoutMs = 60_000;
+
+    /// <summary>
+    /// How long (ms) a sync request may wait on the server: for the response to start, and then for each further
+    /// read of its body. 0 (default) uses <see cref="DefaultHttpTimeoutMs"/>; &lt;0 waits forever. A request that runs
+    /// out fails its push or pull with a <see cref="TursoException"/> naming the timeout.
+    /// <para>A push or pull holds the sync database for its whole round trip, and a new connection can't be opened
+    /// until it ends, so this also bounds how long a dead network can stall opening one.</para>
+    /// <para>It never cuts a long poll short: with <see cref="LongPollTimeoutMs"/> set, a request waits at least
+    /// that long plus <see cref="DefaultHttpTimeoutMs"/>.</para>
+    /// <para>The engine is shared by every connection to a replica, so the first one to open it sets this.</para>
+    /// </summary>
+    public int HttpTimeoutMs { get; init; }
+
+    /// <summary>The timeout <see cref="HttpTimeoutMs"/> and <see cref="LongPollTimeoutMs"/> come to.</summary>
+    internal TimeSpan EffectiveHttpTimeout
+    {
+        get
+        {
+            if (HttpTimeoutMs < 0)
+            {
+                return Timeout.InfiniteTimeSpan;
+            }
+
+            var ms = HttpTimeoutMs == 0 ? DefaultHttpTimeoutMs : HttpTimeoutMs;
+            if (LongPollTimeoutMs > 0)
+            {
+                ms = Math.Max(ms, LongPollTimeoutMs + DefaultHttpTimeoutMs);
+            }
+
+            return TimeSpan.FromMilliseconds(ms);
+        }
+    }
+
     /// <summary>
     /// Bootstrap an empty DB from the remote on create. Must be false for local-only use (true requires
     /// the network to be online to connect to a fresh DB).

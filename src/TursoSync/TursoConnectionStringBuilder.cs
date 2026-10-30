@@ -35,6 +35,8 @@ public sealed class TursoConnectionStringBuilder : DbConnectionStringBuilder
         ["BusyTimeout"] = "Busy Timeout",
         ["Long Poll Timeout"] = "Long Poll Timeout",
         ["LongPollTimeout"] = "Long Poll Timeout",
+        ["Http Timeout"] = "Http Timeout",
+        ["HttpTimeout"] = "Http Timeout",
         ["Pooling"] = "Pooling",
         ["Max Idle Connections"] = "Max Idle Connections",
         ["MaxIdleConnections"] = "Max Idle Connections",
@@ -119,6 +121,14 @@ public sealed class TursoConnectionStringBuilder : DbConnectionStringBuilder
         set => this["Long Poll Timeout"] = value;
     }
 
+    /// <summary>How long (ms) a sync request may wait on the server; 0 = default (60 s), &lt;0 = forever. See
+    /// <see cref="TursoSyncConfig.HttpTimeoutMs"/>.</summary>
+    public int HttpTimeout
+    {
+        get => GetInt("Http Timeout", 0);
+        set => this["Http Timeout"] = value;
+    }
+
     /// <summary>Whether physical connections are pooled and reused (default true).</summary>
     public bool Pooling
     {
@@ -169,6 +179,7 @@ public sealed class TursoConnectionStringBuilder : DbConnectionStringBuilder
                 Bootstrap ? "1" : "0",
                 BusyTimeout.ToString(CultureInfo.InvariantCulture),
                 LongPollTimeout.ToString(CultureInfo.InvariantCulture),
+                HttpTimeout.ToString(CultureInfo.InvariantCulture),
                 Sync ? "1" : "0",
                 EncryptionCipher,
                 EncryptionKey,
@@ -285,6 +296,7 @@ public sealed class TursoConnectionStringBuilder : DbConnectionStringBuilder
             ClientName = NullIfEmpty(GetOption("Client Name")) ?? "tursosync",
             BootstrapIfEmpty = GetBool("Bootstrap"),
             LongPollTimeoutMs = GetInt("Long Poll Timeout", 0),
+            HttpTimeoutMs = GetInt("Http Timeout", 0),
             BusyTimeoutMs = GetInt("Busy Timeout", 5000),
             SchemaGuard = ParseSchemaGuard(GetOption("Schema Guard")),
             EncryptionCipher = NullIfEmpty(GetOption("Encryption Cipher")),

@@ -61,7 +61,7 @@ dotnet add package TursoSync.Dapper   # optional: Dapper type handlers
 ## Connection string keys
 
 `Data Source` (required) · `Remote Url` · `Auth Token` · `Namespace` · `Bootstrap` · `Sync` · `Pooling`
-· `Busy Timeout` · `Long Poll Timeout` · `Encryption Cipher` · `Encryption Key`
+· `Busy Timeout` · `Long Poll Timeout` · `Http Timeout` · `Encryption Cipher` · `Encryption Key`
 · `Experimental Index Method`.
 
 ## Full-text search
