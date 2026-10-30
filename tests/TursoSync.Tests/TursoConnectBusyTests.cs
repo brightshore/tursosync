@@ -115,8 +115,10 @@ public class TursoConnectBusyTests
 
         public long Read()
         {
+            // Sampled before the read is counted, so a test woken by WaitForReads knows this time is fixed.
+            var now = Volatile.Read(ref _now);
             Interlocked.Increment(ref _reads);
-            return Volatile.Read(ref _now);
+            return now;
         }
 
         public void Advance(int ms) => Interlocked.Add(ref _now, ms);
