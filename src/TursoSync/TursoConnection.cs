@@ -213,6 +213,31 @@ public sealed class TursoConnection : DbConnection
         _physical = created;
     }
 
+    /// <summary>
+    /// Open the connection only if an idle pooled connection can be rented, and never connect: true when it opened,
+    /// false (and still closed) when the pool had none idle or <c>Pooling</c> is off.
+    ///
+    /// <para>For a caller that must not wait on the network. A push or pull holds the sync database for its whole
+    /// round trip, and making a new connection waits for it, while renting an idle one needs nothing from the engine.
+    /// <see cref="Open"/> and <see cref="OpenAsync(CancellationToken)"/> fall back to connecting when none is idle,
+    /// and checking <see cref="WarmPool"/>'s idle count first does not help: another opener can take the last idle
+    /// connection between the check and the open. The rent here is one atomic take from the pool.</para>
+    ///
+    /// <para>A connection that has sat idle for a while is probed with a trivial query before it is handed out, as
+    /// every rent does; a probe that finds it unusable disposes it and tries the next one.</para>
+    /// </summary>
+    public bool TryOpenIdle()
+    {
+        ThrowIfCannotOpen();
+        if (RentIdle() is not { } idle)
+        {
+            return false;
+        }
+
+        _physical = idle;
+        return true;
+    }
+
     /// <summary>Raised on the thread pool as a cold <see cref="OpenAsync(CancellationToken)"/> begins its connect,
     /// so a test can act once the connect is really under way (a cancel before then never reaches it).</summary>
     internal static Action? ColdOpenStarting;
