@@ -64,6 +64,47 @@ dotnet add package TursoSync.Dapper   # optional: Dapper type handlers
 · `Busy Timeout` · `Long Poll Timeout` · `Http Timeout` · `Encryption Cipher` · `Encryption Key`
 · `Experimental Index Method`.
 
+## Sync HTTP diagnostics
+
+The opt-in HTTP diagnostics API requires **TursoSync 1.8.0 or later** (the next minor
+release; 1.7.x does not contain it). This change does not publish a package. Consumers
+such as Foxery must upgrade their TursoSync reference after that release is published.
+
+Set `TursoSyncConfig.HttpDiagnostics` before `TursoSyncDatabase.Create` to include
+bootstrap requests, or use `TursoSyncDatabase.HttpDiagnostics` on an open replica to
+log a push:
+
+```csharp
+var database = synced.SyncDatabase!;
+var previous = database.HttpDiagnostics;
+try
+{
+    database.HttpDiagnostics = diagnostic => Console.WriteLine(diagnostic);
+    database.Push();
+}
+finally
+{
+    database.HttpDiagnostics = previous;
+}
+```
+
+The callback defaults to null (off). It receives one `TursoSyncHttpDiagnostic` when
+an HTTP request finishes or fails: method, an allowlisted endpoint label (`info`,
+`pull-updates`, `push-updates`, or `other`), request body bytes, time to response
+headers, status, declared response bytes, actual bytes read, total duration, and
+`FailurePhase` (`None`, `BeforeHeaders`, or `ResponseBody`). Unknown methods become
+`OTHER`. No URL, query, arbitrary path, headers, credentials, payload, or exception
+text is included. Null measurements mean unavailable; partial body bytes survive a
+read failure. HTTP error statuses are reported unchanged and are not themselves
+transport failures. Existing sync error handling and timeouts are unchanged.
+
+Callbacks run synchronously under the sync operation lock; keep them fast and do
+not call back into the database. Callback exceptions are swallowed. Timings exclude
+the callback. Events arrive on completion, not while a request is stalled; an
+infinite HTTP timeout can therefore postpone an event indefinitely. The callback
+is shared by all connections using the same replica and captured per request:
+coordinate temporary changes with other database users if logging only one push.
+
 ## Full-text search
 
 Tantivy FTS is behind the engine's experimental `index_method` feature, so opt in with

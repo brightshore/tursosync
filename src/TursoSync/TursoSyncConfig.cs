@@ -82,6 +82,13 @@ public sealed record TursoSyncConfig
     /// </summary>
     public int HttpTimeoutMs { get; init; }
 
+    /// <summary>
+    /// Optional credential-safe HTTP completion callback, including requests during create/bootstrap.
+    /// Null (off) by default. Initializes <see cref="TursoSyncDatabase.HttpDiagnostics"/>; see that property
+    /// for callback threading and shared-replica semantics. Callback exceptions are ignored.
+    /// </summary>
+    public Action<TursoSyncHttpDiagnostic>? HttpDiagnostics { get; init; }
+
     /// <summary>The timeout <see cref="HttpTimeoutMs"/> and <see cref="LongPollTimeoutMs"/> come to.</summary>
     internal TimeSpan EffectiveHttpTimeout
     {

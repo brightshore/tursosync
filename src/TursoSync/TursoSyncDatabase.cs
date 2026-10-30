@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -17,6 +18,14 @@ public sealed partial class TursoSyncDatabase : IDisposable
     /// <summary>The lock every engine operation holds, connect included. Tests hold it to stand in for a push or
     /// pull that is on the network.</summary>
     internal object Gate => _gate;
+    /// <summary>
+    /// Optional callback for one safe diagnostic per completed HTTP request (including failed requests).
+    /// Null by default. Runs synchronously under the database's operation lock; keep it fast and do not
+    /// reenter the database. Exceptions from the callback are ignored. Shared by all connections to this
+    /// replica; coordinate changes with other users of the database. Captured once per request.
+    /// </summary>
+    public Action<TursoSyncHttpDiagnostic>? HttpDiagnostics { get; set; }
+
     private readonly HttpClient _http;
     private readonly string _baseUrl;
     private readonly string? _authToken;
@@ -101,6 +110,7 @@ public sealed partial class TursoSyncDatabase : IDisposable
         var self = new TursoSyncDatabase(db, baseUrl.TrimEnd('/'), Trim(config.AuthToken), config.Namespace, http)
         {
             _config = config,
+            HttpDiagnostics = config.HttpDiagnostics,
         };
         try
         {
@@ -487,13 +497,9 @@ public sealed partial class TursoSyncDatabase : IDisposable
                 _authToken,
                 BuildHost(_baseUrl, _namespace));
 
-            // HttpClient.Timeout covers the wait for the response headers only (ResponseHeadersRead), so the body
-            // gets the same bound per read: a download that stops arriving fails rather than hanging.
-            using var response = _http.Send(message, HttpCompletionOption.ResponseHeadersRead);
-            TursoNative.SyncIoStatus(item, (int)response.StatusCode);
-
-            using var stream = response.Content.ReadAsStream();
-            PumpStream(item, new IdleTimeoutStream(stream, _http.Timeout));
+            SendHttp(_http, message, HttpDiagnostics,
+                statusCode => TursoNative.SyncIoStatus(item, statusCode),
+                stream => PumpStream(item, stream));
             TursoNative.SyncIoDone(item);
         }
         catch (Exception ex) when (IsHttpTimeout(ex))
@@ -508,6 +514,67 @@ public sealed partial class TursoSyncDatabase : IDisposable
         }
     }
 
+    // Keep the transport native-free so loopback tests exercise exactly the path used by HandleHttp.
+    internal static void SendHttp(HttpClient http, HttpRequestMessage message,
+        Action<TursoSyncHttpDiagnostic>? diagnostics, Action<int> onStatus, Action<Stream> readBody)
+    {
+        var timer = diagnostics is null ? null : Stopwatch.StartNew();
+        TimeSpan? headersDuration = null;
+        int? status = null;
+        long? declaredBytes = null;
+        IdleTimeoutStream? body = null;
+        var failure = TursoSyncHttpFailurePhase.BeforeHeaders;
+        try
+        {
+            // ResponseHeadersRead preserves the separate header and per-read idle timeouts.
+            using var response = http.Send(message, HttpCompletionOption.ResponseHeadersRead);
+            headersDuration = timer?.Elapsed;
+            status = (int)response.StatusCode;
+            failure = TursoSyncHttpFailurePhase.ResponseBody;
+            if (diagnostics is not null)
+            {
+                declaredBytes = response.Content.Headers.ContentLength;
+            }
+            onStatus(status.Value);
+            using var stream = response.Content.ReadAsStream();
+            body = new IdleTimeoutStream(stream, http.Timeout);
+            readBody(body);
+            failure = TursoSyncHttpFailurePhase.None;
+        }
+        finally
+        {
+            if (diagnostics is not null)
+            {
+                var duration = timer!.Elapsed;
+                try
+                {
+                    diagnostics(new TursoSyncHttpDiagnostic(
+                        SafeMethod(message.Method.Method), SafeEndpoint(message.RequestUri),
+                        message.Content?.Headers.ContentLength ?? 0, headersDuration, status,
+                        declaredBytes, body?.BytesRead, duration, failure));
+                }
+                catch (Exception)
+                {
+                    // Observability must never replace a transport error or fail a successful sync.
+                }
+            }
+        }
+    }
+
+    private static string SafeMethod(string method) => method switch
+    {
+        "GET" or "POST" or "PUT" or "DELETE" or "PATCH" or "HEAD" or "OPTIONS" => method,
+        _ => "OTHER",
+    };
+
+    private static string SafeEndpoint(Uri? uri) => uri?.AbsolutePath switch
+    {
+        "/info" => "info",
+        "/pull-updates" => "pull-updates",
+        "/push-updates" => "push-updates",
+        _ => "other",
+    };
+
     private static bool IsHttpTimeout(Exception ex) =>
         ex is TimeoutException || (ex is TaskCanceledException && ex.InnerException is TimeoutException);
 
@@ -515,7 +582,16 @@ public sealed partial class TursoSyncDatabase : IDisposable
     /// has waited <c>timeout</c> for data.</summary>
     private sealed class IdleTimeoutStream(Stream inner, TimeSpan timeout) : Stream
     {
+        public long BytesRead { get; private set; }
+
         public override int Read(byte[] buffer, int offset, int count)
+        {
+            var read = ReadCore(buffer, offset, count);
+            BytesRead += read;
+            return read;
+        }
+
+        private int ReadCore(byte[] buffer, int offset, int count)
         {
             if (timeout == Timeout.InfiniteTimeSpan)
             {
