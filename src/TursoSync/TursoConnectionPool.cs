@@ -135,8 +135,9 @@ internal sealed class TursoPhysicalConnection : IDisposable
     /// <summary>When set, this physical connection is dropped rather than pooled on return.</summary>
     public bool NonPoolable { get; set; }
 
-    /// <summary><see cref="Environment.TickCount64"/> when this was last returned to the pool, so renting can
-    /// skip the health probe on a connection that was just proven healthy.</summary>
+    /// <summary>The pool's <see cref="TursoConnectionPool.Clock"/> (milliseconds, <see cref="Environment.TickCount64"/>
+    /// unless a test replaces it) when this was last returned to the pool, so renting can skip the health probe on a
+    /// connection that was just proven healthy.</summary>
     public long PooledAtMs { get; set; }
 
     /// <summary>The owning sync database for the sync lane, or null for a base (local) connection.</summary>
