@@ -1,0 +1,15 @@
+Directory.Build.props
+  ai_agent 17
+src/TursoSync/CHANGELOG.md
+  ai_agent 3-8
+src/TursoSync.DbUp/CHANGELOG.md
+  ai_agent 3-9
+src/TursoSync.Dapper/CHANGELOG.md
+  ai_agent 3-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "7de31156936d0edf52aa1dcf3839d4d234da8dac",
+  "prompts": {}
+}
