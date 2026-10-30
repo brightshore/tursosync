@@ -27,6 +27,14 @@ internal static class TursoConnectionPool
     public static TursoPhysicalConnection Rent(string key, TursoSyncConfig config, bool forceSync) =>
         TryRentIdle(key) ?? TursoPhysicalConnection.Create(config, forceSync);
 
+    /// <summary>The clock idle ages are measured on, in milliseconds. Tests replace it to age a pooled connection
+    /// without waiting.</summary>
+    internal static Func<long> Clock { get; set; } = static () => Environment.TickCount64;
+
+    /// <summary>The health probe a rent runs on a connection idle for <see cref="ProbeAfterIdleMs"/> or more. Tests
+    /// replace it to stand in for a probe that blocks or fails.</summary>
+    internal static Func<TursoPhysicalConnection, bool> Probe { get; set; } = static pooled => pooled.IsUsable();
+
     /// <summary>An idle, healthy pooled connection for <paramref name="key"/>, or null if there is none. Never
     /// creates one, so it never waits on a sync database's gate.</summary>
     public static TursoPhysicalConnection? TryRentIdle(string key)
@@ -35,7 +43,7 @@ internal static class TursoConnectionPool
         {
             while (queue.TryDequeue(out var pooled))
             {
-                if (Environment.TickCount64 - pooled.PooledAtMs < ProbeAfterIdleMs || pooled.IsUsable())
+                if (Clock() - pooled.PooledAtMs < ProbeAfterIdleMs || Probe(pooled))
                 {
                     return pooled;
                 }
@@ -50,6 +58,18 @@ internal static class TursoConnectionPool
 
         return null;
     }
+
+    /// <summary>
+    /// An idle pooled connection for <paramref name="key"/>, taken as it is, or null if there is none: no health probe
+    /// and no disposal, so nothing here can wait. <see cref="TryRentIdle"/> probes a long-idle connection with a
+    /// statement, and a statement on a synced connection drives the engine's shared IO queue, where it can pick up a
+    /// stuck push's HTTP request and wait out its round trip; it also waits out the busy timeout on a contended prepare.
+    /// And it disposes a connection that fails the probe, which releases the sync engine through
+    /// <see cref="TursoSyncDatabaseCache"/>'s lock, held while another replica's engine is being created (a bootstrap
+    /// download included). A connection taken here that has died fails its first statement instead.
+    /// </summary>
+    public static TursoPhysicalConnection? TakeIdle(string key) =>
+        Pools.TryGetValue(key, out var queue) && queue.TryDequeue(out var pooled) ? pooled : null;
 
     /// <summary>Return a physical connection to the pool, or dispose it if the pool is full / it's unhealthy.</summary>
     public static void Return(string key, TursoPhysicalConnection physical, int maxIdle = DefaultMaxIdlePerKey)
@@ -69,7 +89,7 @@ internal static class TursoConnectionPool
             return;
         }
 
-        physical.PooledAtMs = Environment.TickCount64;
+        physical.PooledAtMs = Clock();
         queue.Enqueue(physical);
     }
 
@@ -115,8 +135,9 @@ internal sealed class TursoPhysicalConnection : IDisposable
     /// <summary>When set, this physical connection is dropped rather than pooled on return.</summary>
     public bool NonPoolable { get; set; }
 
-    /// <summary><see cref="Environment.TickCount64"/> when this was last returned to the pool, so renting can
-    /// skip the health probe on a connection that was just proven healthy.</summary>
+    /// <summary>The pool's <see cref="TursoConnectionPool.Clock"/> (milliseconds, <see cref="Environment.TickCount64"/>
+    /// unless a test replaces it) when this was last returned to the pool, so renting can skip the health probe on a
+    /// connection that was just proven healthy.</summary>
     public long PooledAtMs { get; set; }
 
     /// <summary>The owning sync database for the sync lane, or null for a base (local) connection.</summary>

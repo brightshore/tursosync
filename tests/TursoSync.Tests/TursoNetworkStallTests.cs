@@ -106,6 +106,222 @@ public class TursoNetworkStallTests
         remote.Requests.Should().BeGreaterThan(0, "the request reached the remote, so the timeout is what failed it");
     }
 
+    /// <summary><see cref="TursoConnection.TryOpenIdle"/> is the open that a push stuck on the network cannot hold up:
+    /// it rents the idle connection while the push waits, and with none left it says no rather than connecting.</summary>
+    [TestMethod]
+    public async Task TryOpenIdle_Rents_While_A_Push_Is_Stuck_And_Never_Connects_When_None_Is_Idle()
+    {
+        if (!TursoNativeLibrary.IsAvailable())
+        {
+            Assert.Inconclusive("turso_sync_sdk_kit native library not found");
+        }
+
+        using var remote = HungRemote.Start();
+        var dir = Directory.CreateTempSubdirectory("tursosync-stall-");
+        var path = Path.Combine(dir.FullName, "store.db");
+        var cs = $"Data Source={path};Remote Url={remote.BaseUrl};Bootstrap=false;Schema Guard=Off";
+
+        var pusher = new TursoConnection(cs + ";Pooling=false");
+        try
+        {
+            using (var seed = new TursoConnection(cs))
+            {
+                seed.Open();
+                seed.ExecuteNonQuery("CREATE TABLE t (x INTEGER PRIMARY KEY)");
+                seed.ExecuteNonQuery("INSERT INTO t VALUES (1)");
+            } // back to the pool: the one idle connection
+
+            pusher.Open();
+            var push = Task.Factory.StartNew(() => pusher.SyncDatabase!.Push(), TaskCreationOptions.LongRunning);
+            (await remote.FirstRequest.WaitAsync(StuckAfter)).Should().StartWith("POST", "the push has to be on the network for this to test anything");
+            var references = TursoConnection.OpenReplicas.Single(r => r.Path == path).Connections;
+
+            var work = Task.Factory.StartNew(() =>
+            {
+                using var idle = new TursoConnection(cs);
+                var rented = idle.TryOpenIdle();
+                idle.ExecuteNonQuery("INSERT INTO t VALUES (2)");
+
+                using var none = new TursoConnection(cs);
+                var second = none.TryOpenIdle();
+                return (rented, second, none.State, TursoConnection.OpenReplicas.Single(r => r.Path == path).Connections);
+            }, TaskCreationOptions.LongRunning);
+
+            (await Task.WhenAny(work, push, Task.Delay(StuckAfter))).Should().BeSameAs(work, "renting an idle connection needs nothing the push holds");
+            var (rented, second, state, after) = await work;
+            rented.Should().BeTrue("the pool held an idle connection");
+            second.Should().BeFalse("the only idle connection is in use, and TryOpenIdle never connects");
+            state.Should().Be(System.Data.ConnectionState.Closed);
+            after.Should().Be(references, "no new connection was started on the replica's engine");
+            push.IsCompleted.Should().BeFalse("the remote never answered, so the push is still waiting");
+
+            remote.Dispose(); // drop the connection, so the push fails and the replica can close
+            await push.ContinueWith(_ => { });
+        }
+        finally
+        {
+            pusher.Dispose();
+            TursoConnection.ClearPool();
+            try { dir.Delete(recursive: true); } catch { /* temp */ }
+        }
+    }
+
+    /// <summary>A connection idle long enough that an ordinary rent would probe it is handed over unprobed: the probe is a
+    /// statement, and a statement can end up waiting on the stuck push (it drives the engine's shared IO queue) or on
+    /// a busy lock. The probe here stands in for one that does, and blocks until the test ends.</summary>
+    [TestMethod]
+    public async Task TryOpenIdle_Hands_Over_A_Long_Idle_Connection_Without_Probing_It_While_A_Push_Is_Stuck()
+    {
+        using var probeStuck = new ManualResetEventSlim();
+        var probed = 0;
+        try
+        {
+            await WithStuckPushAsync(
+                probe: _ =>
+                {
+                    Interlocked.Increment(ref probed);
+                    probeStuck.Wait();
+                    return true;
+                },
+                async (cs, push, closeLater) =>
+                {
+                    var work = Task.Factory.StartNew(() =>
+                    {
+                        var idle = new TursoConnection(cs);
+                        closeLater(idle);
+                        return idle.TryOpenIdle();
+                    }, TaskCreationOptions.LongRunning);
+
+                    (await Task.WhenAny(work, push, Task.Delay(StuckAfter))).Should().BeSameAs(work,
+                        "handing over an idle connection runs no statement, so nothing the push holds can stop it");
+                    (await work).Should().BeTrue();
+                    Volatile.Read(ref probed).Should().Be(0);
+                });
+        }
+        finally
+        {
+            probeStuck.Set(); // a probe stuck in a failing run must not outlive it
+        }
+    }
+
+    /// <summary>A connection a probe would find dead is not disposed on the way out: disposing it releases the sync
+    /// engine through the engine cache's lock, which is held while a replica's engine is created, a bootstrap download
+    /// included. The test holds that lock throughout.</summary>
+    [TestMethod]
+    public async Task TryOpenIdle_Never_Retires_A_Connection_Under_The_Engine_Cache_Lock_While_A_Push_Is_Stuck()
+    {
+        await WithStuckPushAsync(
+            probe: _ => false,
+            async (cs, push, closeLater) =>
+            {
+                using var held = new ManualResetEventSlim();
+                using var release = new ManualResetEventSlim();
+                var holder = new Thread(() =>
+                {
+                    lock (TursoSyncDatabaseCache.Gate)
+                    {
+                        held.Set();
+                        release.Wait();
+                    }
+                }) { IsBackground = true };
+                holder.Start();
+                held.Wait();
+                try
+                {
+                    var work = Task.Factory.StartNew(() =>
+                    {
+                        var idle = new TursoConnection(cs);
+                        closeLater(idle);
+                        return idle.TryOpenIdle();
+                    }, TaskCreationOptions.LongRunning);
+
+                    (await Task.WhenAny(work, push, Task.Delay(StuckAfter))).Should().BeSameAs(work,
+                        "TryOpenIdle disposes nothing, so it never needs the engine cache's lock");
+                    (await work).Should().BeTrue("the connection is handed over; a dead one would fail its first statement");
+                }
+                finally
+                {
+                    release.Set();
+                    holder.Join();
+                }
+            });
+    }
+
+    /// <summary>Run <paramref name="body"/> against a replica with one connection idle for a minute (on the pool's
+    /// clock, not the wall's) and a push stuck on a remote that never answers, with <paramref name="probe"/> standing in
+    /// for the pool's health probe. Connections handed to the body's <c>closeLater</c> are closed only once the push has
+    /// ended: closing returns a connection through the pool's real health probe, which can itself wait on a stuck push,
+    /// and the tests are about opening alone.</summary>
+    private static async Task WithStuckPushAsync(
+        Func<TursoPhysicalConnection, bool> probe, Func<string, Task, Action<TursoConnection>, Task> body)
+    {
+        if (!TursoNativeLibrary.IsAvailable())
+        {
+            Assert.Inconclusive("turso_sync_sdk_kit native library not found");
+        }
+
+        var now = 0L;
+        using var remote = HungRemote.Start();
+        var dir = Directory.CreateTempSubdirectory("tursosync-stall-");
+        var cs = $"Data Source={Path.Combine(dir.FullName, "store.db")};Remote Url={remote.BaseUrl};Bootstrap=false;Schema Guard=Off";
+        var pusher = new TursoConnection(cs + ";Pooling=false");
+        var opened = new System.Collections.Concurrent.ConcurrentQueue<TursoConnection>();
+        Task? push = null;
+        try
+        {
+            // Inside the try, so the finally always puts the real clock back for the tests that run after this one.
+            TursoConnectionPool.Clock = () => Volatile.Read(ref now);
+            using (var seed = new TursoConnection(cs))
+            {
+                seed.Open();
+                seed.ExecuteNonQuery("CREATE TABLE t (x INTEGER PRIMARY KEY)");
+                seed.ExecuteNonQuery("INSERT INTO t VALUES (1)");
+            } // back to the pool at 0 ms
+
+            pusher.Open();
+            push = Task.Factory.StartNew(() => pusher.SyncDatabase!.Push(), TaskCreationOptions.LongRunning);
+            (await remote.FirstRequest.WaitAsync(StuckAfter)).Should().StartWith("POST", "the push has to be on the network for this to test anything");
+
+            Volatile.Write(ref now, 60_000); // idle for a minute: an ordinary rent would probe it
+            TursoConnectionPool.Probe = probe;
+            await body(cs, push, opened.Enqueue);
+            push.IsCompleted.Should().BeFalse("the remote never answered, so the push is still waiting");
+
+            remote.Dispose(); // drop the connection, so the push fails and the replica can close
+            await push.ContinueWith(_ => { });
+        }
+        finally
+        {
+            TursoConnectionPool.Probe = static pooled => pooled.IsUsable();
+            TursoConnectionPool.Clock = static () => Environment.TickCount64;
+
+            // A body that failed mid-way leaves the push stuck. End it before closing anything: a close returns the
+            // connection through the pool's real health probe, which can wait on that push and hang the run.
+            remote.Dispose();
+            if (push is not null)
+            {
+                await push.ContinueWith(_ => { });
+            }
+
+            while (opened.TryDequeue(out var conn))
+            {
+                conn.Dispose();
+            }
+
+            pusher.Dispose();
+            TursoConnection.ClearPool();
+            try { dir.Delete(recursive: true); } catch { /* temp */ }
+        }
+    }
+
+    [TestMethod]
+    public void TryOpenIdle_Says_No_When_Pooling_Is_Off()
+    {
+        using var conn = new TursoConnection("Data Source=never-created.db;Pooling=false");
+        conn.TryOpenIdle().Should().BeFalse();
+        conn.State.Should().Be(System.Data.ConnectionState.Closed);
+    }
+
     [TestMethod]
     public void Http_Timeout_Is_Read_From_The_Connection_String()
     {

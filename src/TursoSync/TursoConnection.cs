@@ -213,6 +213,37 @@ public sealed class TursoConnection : DbConnection
         _physical = created;
     }
 
+    /// <summary>
+    /// Open the connection only if an idle pooled connection can be rented, and never connect: true when it opened,
+    /// false (and still closed) when the pool had none idle or <c>Pooling</c> is off.
+    ///
+    /// <para>For a caller that must not wait on the network. A push or pull holds the sync database for its whole
+    /// round trip, and making a new connection waits for it, while renting an idle one needs nothing from the engine.
+    /// <see cref="Open"/> and <see cref="OpenAsync(CancellationToken)"/> fall back to connecting when none is idle,
+    /// and checking <see cref="WarmPool"/>'s idle count first does not help: another opener can take the last idle
+    /// connection between the check and the open. The rent here is one atomic take from the pool.</para>
+    ///
+    /// <para>Unlike every other rent, it hands the idle connection over without the health probe a long-idle one
+    /// otherwise gets, and never disposes one: the probe is a statement, which can wait on the network (it drives the
+    /// sync engine's shared IO queue) or on a busy lock, and disposing a dead connection takes a lock that is held while
+    /// a replica's engine is created. A connection that died while idle fails the caller's first statement instead,
+    /// as one that dies just after a probe would.</para>
+    ///
+    /// <para>The guarantee covers opening only. Closing the connection returns it to the pool as any other close does,
+    /// which probes it and disposes it if the probe fails, and that can wait.</para>
+    /// </summary>
+    public bool TryOpenIdle()
+    {
+        ThrowIfCannotOpen();
+        if (!_options.Pooling || TursoConnectionPool.TakeIdle(_options.PoolKey) is not { } idle)
+        {
+            return false;
+        }
+
+        _physical = idle;
+        return true;
+    }
+
     /// <summary>Raised on the thread pool as a cold <see cref="OpenAsync(CancellationToken)"/> begins its connect,
     /// so a test can act once the connect is really under way (a cancel before then never reaches it).</summary>
     internal static Action? ColdOpenStarting;

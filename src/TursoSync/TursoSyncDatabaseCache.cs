@@ -36,7 +36,9 @@ internal static class TursoSyncDatabaseCache
     }
 
     private static readonly Dictionary<string, Entry> Entries = new(StringComparer.Ordinal);
-    private static readonly object Gate = new();
+    /// <summary>Held while an engine is acquired or released, including while <see cref="TursoSyncDatabase.Create"/>
+    /// runs (a bootstrap download among it). Tests hold it to stand in for that.</summary>
+    internal static readonly object Gate = new();
 
     /// <summary>
     /// Get the engine for <paramref name="config"/>'s replica, creating it if this is the first caller, and
