@@ -51,8 +51,8 @@ public sealed partial class TursoSyncDatabase : IDisposable
     /// </summary>
     public static TursoSyncDatabase Create(TursoSyncConfig config)
     {
-        ArgumentOutOfRangeException.ThrowIfNegative(config.PushOperationsThreshold);
         ArgumentNullException.ThrowIfNull(config);
+        ArgumentOutOfRangeException.ThrowIfNegative(config.PushOperationsThreshold);
 
         // Local at-rest encryption is a base-engine feature only. The upstream sync engine never plumbs the
         // pager cipher/key into its local files (the Go binding this was ported from has no such config), and

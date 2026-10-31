@@ -64,6 +64,31 @@ public class TursoConnectionStringBuilderTests
     }
 
     [TestMethod]
+    public void PushOperationsThreshold_Negative_Setter_Throws()
+    {
+        var b = new TursoConnectionStringBuilder();
+        var act = () => b.PushOperationsThreshold = -1;
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [TestMethod]
+    [DataRow("Push Operations Threshold")]
+    [DataRow("PushOperationsThreshold")]
+    public void PushOperationsThreshold_Negative_Parsed_Or_Indexed_Value_Throws(string keyword)
+    {
+        var parsed = new TursoConnectionStringBuilder($"Data Source=x.db;{keyword}=-5");
+        var indexed = new TursoConnectionStringBuilder("Data Source=x.db") { [keyword] = -5 };
+        foreach (var b in new[] { parsed, indexed })
+        {
+            Action read = () => _ = b.PushOperationsThreshold;
+            Action config = () => b.ToConfig();
+            Action poolKey = () => _ = b.PoolKey;
+            foreach (var act in new[] { read, config, poolKey })
+                act.Should().ThrowExactly<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("Push Operations Threshold");
+        }
+    }
+
+    [TestMethod]
     public void SetEncryption_SetsCipherAndKey()
     {
         var b = new TursoConnectionStringBuilder();

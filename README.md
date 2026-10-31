@@ -72,6 +72,10 @@ string, or `TursoSyncConfig.PushOperationsThreshold`, to change the threshold. Z
 one request for the whole change set. A batch ends at a transaction boundary, so one larger transaction
 can exceed the threshold. A retry resumes from the last batch the server acknowledged.
 
+Connections to the same replica share one sync engine and must agree on the threshold. A conflicting
+threshold is rejected when opening a connection. Close the existing connections and call
+`TursoConnection.ClearPool()` before reopening with a different value.
+
 ## Sync HTTP diagnostics
 
 The opt-in HTTP diagnostics API requires **TursoSync 1.8.0 or later** (the next minor

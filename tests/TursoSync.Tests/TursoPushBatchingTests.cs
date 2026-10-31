@@ -10,6 +10,13 @@ namespace TursoSync.Tests;
 public class TursoPushBatchingTests
 {
     [TestMethod]
+    public void Create_Rejects_Null_Config_Before_Reading_The_Threshold()
+    {
+        Action create = () => TursoSyncDatabase.Create(null!);
+        create.Should().ThrowExactly<ArgumentNullException>().Which.ParamName.Should().Be("config");
+    }
+
+    [TestMethod]
     public void ConnectionString_Propagates_The_Threshold_And_Defaults_To_Bounded_Pushes()
     {
         var defaults = new TursoConnectionStringBuilder("Data Source=unused");
@@ -22,6 +29,59 @@ public class TursoPushBatchingTests
 
         Action invalid = () => TursoSyncDatabase.Create(new TursoSyncConfig { Path = "unused", PushOperationsThreshold = -1 });
         invalid.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task Connections_Reject_Conflicting_Thresholds_Until_The_Shared_Engine_Is_Released(bool pooling)
+    {
+        if (!TursoNativeLibrary.IsAvailable()) Assert.Inconclusive("turso_sync_sdk_kit native library not found");
+        var dir = Directory.CreateTempSubdirectory("tursosync-batching-");
+        try
+        {
+            await using var server = new PushRemote();
+            var options = new TursoConnectionStringBuilder
+            {
+                DataSource = Path.Combine(dir.FullName, "store.db"), RemoteUrl = server.Url,
+                Pooling = pooling, SchemaGuard = TursoSchemaGuardMode.Off,
+            };
+            var defaultThreshold = options.ConnectionString;
+            options.PushOperationsThreshold = 1000;
+            var explicitDefault = options.ConnectionString;
+            options.PushOperationsThreshold = 0;
+            using var conflicting = new TursoConnection(options.ConnectionString);
+            Action openConflicting = conflicting.Open;
+            using (var first = new TursoConnection(defaultThreshold))
+            using (var compatible = new TursoConnection(explicitDefault))
+            {
+                first.Open();
+                compatible.Open();
+                compatible.SyncDatabase.Should().BeSameAs(first.SyncDatabase);
+                openConflicting.Should().Throw<InvalidOperationException>().WithMessage("*Push Operations Threshold*");
+                conflicting.State.Should().Be(System.Data.ConnectionState.Closed);
+                TursoSyncDatabaseCache.RefCountFor(options.DataSource).Should().Be(2);
+            }
+
+            if (pooling)
+            {
+                openConflicting.Should().Throw<InvalidOperationException>().WithMessage("*Push Operations Threshold*");
+                TursoSyncDatabaseCache.RefCountFor(options.DataSource).Should().Be(2);
+            }
+            TursoConnection.ClearPool();
+            TursoSyncDatabaseCache.RefCountFor(options.DataSource).Should().Be(0);
+
+            conflicting.Open();
+            conflicting.Raw.Execute("CREATE TABLE items (value TEXT)");
+            for (var i = 0; i < 5; i++) conflicting.Raw.Execute($"INSERT INTO items VALUES ('batch-row-{i}')");
+            conflicting.SyncDatabase!.Push();
+            server.Batches.Select(b => b.Length).Should().Equal(5);
+        }
+        finally
+        {
+            TursoConnection.ClearPool();
+            dir.Delete(recursive: true);
+        }
     }
 
     [TestMethod]

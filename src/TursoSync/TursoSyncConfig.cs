@@ -74,6 +74,8 @@ public sealed record TursoSyncConfig
     /// Split pushes into HTTP batches once this many CDC operations have accumulated. Batches end only at
     /// transaction boundaries, so a single larger transaction is never split. Zero sends the whole change set
     /// in one request. Bounded batches let an offline backlog make progress without one enormous upload.
+    /// <para>ADO.NET connections sharing a replica must use the same threshold. Close them and call
+    /// <see cref="TursoConnection.ClearPool"/> before reopening with a different threshold.</para>
     /// </summary>
     public int PushOperationsThreshold { get; init; } = DefaultPushOperationsThreshold;
 

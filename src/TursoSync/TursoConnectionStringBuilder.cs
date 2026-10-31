@@ -135,7 +135,12 @@ public sealed class TursoConnectionStringBuilder : DbConnectionStringBuilder
     /// never split a transaction. See <see cref="TursoSyncConfig.PushOperationsThreshold"/>.</summary>
     public int PushOperationsThreshold
     {
-        get => GetInt("Push Operations Threshold", TursoSyncConfig.DefaultPushOperationsThreshold);
+        get
+        {
+            var value = GetInt("Push Operations Threshold", TursoSyncConfig.DefaultPushOperationsThreshold);
+            ArgumentOutOfRangeException.ThrowIfNegative(value, "Push Operations Threshold");
+            return value;
+        }
         set
         {
             ArgumentOutOfRangeException.ThrowIfNegative(value);

@@ -32,6 +32,9 @@ internal static class TursoSyncDatabaseCache
         /// is rejected rather than silently handed an engine pointing somewhere else.</summary>
         public required string RemoteIdentity { get; init; }
 
+        /// <summary>Batch size fixed when the shared engine was created. Later connections must agree.</summary>
+        public required int PushOperationsThreshold { get; init; }
+
         public int RefCount { get; set; }
     }
 
@@ -61,6 +64,14 @@ internal static class TursoSyncDatabaseCache
                         + $"refusing to also open it against '{identity}'. Close the existing connections first.");
                 }
 
+                if (existing.PushOperationsThreshold != config.PushOperationsThreshold)
+                {
+                    throw new InvalidOperationException(
+                        $"The replica at '{key}' is already open with Push Operations Threshold "
+                        + $"{existing.PushOperationsThreshold}; refusing to also open it with {config.PushOperationsThreshold}. "
+                        + "Close the existing connections and call TursoConnection.ClearPool() before changing the threshold.");
+                }
+
                 existing.RefCount++;
                 return (key, existing.Database);
             }
@@ -68,7 +79,11 @@ internal static class TursoSyncDatabaseCache
             // Created under the gate: concurrent creation over one replica is exactly what fails with
             // "database tape error: database is busy", and there is nothing to gain by racing here.
             var database = TursoSyncDatabase.Create(config);
-            Entries[key] = new Entry { Database = database, RemoteIdentity = identity, RefCount = 1 };
+            Entries[key] = new Entry
+            {
+                Database = database, RemoteIdentity = identity,
+                PushOperationsThreshold = config.PushOperationsThreshold, RefCount = 1,
+            };
             return (key, database);
         }
     }
