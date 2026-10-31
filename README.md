@@ -117,6 +117,20 @@ infinite HTTP timeout can therefore postpone an event indefinitely. The callback
 is shared by all connections using the same replica and captured per request:
 coordinate temporary changes with other database users if logging only one push.
 
+## Engine fixes and large backlogs
+
+The native build applies the maintained patches under `patches/` to the exact
+`turso-engine.json` revision. Both release and integration builds include those
+patches, and their cache keys include the patch contents. `local-pack.sh` applies
+them before building from source; when supplying `TURSOSYNC_NATIVE_DIR`, supply a
+native built with the same patches.
+
+Pull/replay retains the original local CDC transaction boundaries inside the
+atomic apply transaction. A later push can therefore keep using bounded batches;
+real transactions larger than the threshold still remain intact. A backlog
+already collapsed by an earlier engine cannot regain its lost boundaries. Set
+`Http Timeout=-1` to allow its large upload to finish without a client deadline.
+
 ## Full-text search
 
 Tantivy FTS is behind the engine's experimental `index_method` feature, so opt in with

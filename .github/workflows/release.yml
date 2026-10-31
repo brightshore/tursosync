@@ -71,11 +71,15 @@ jobs:
           ref: ${{ steps.pin.outputs.sha }}
           path: turso
 
+      - name: Apply engine fixes
+        shell: bash
+        run: scripts/apply-engine-patches.sh turso
+
       - name: Cache Turso Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: turso
-          key: ${{ steps.pin.outputs.sha }}-${{ matrix.rid }}
+          key: ${{ steps.pin.outputs.sha }}-${{ matrix.rid }}-${{ hashFiles('patches/*.patch') }}
 
       - name: Build native (Release, FTS, stripped)
         shell: bash
