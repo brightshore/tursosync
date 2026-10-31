@@ -1,0 +1,25 @@
+src/TursoSync/TursoConnectionStringBuilder.cs
+  s_7e6671464a6479::t_bbac56fbc8b728 40-41,134-145,197,315
+src/TursoSync/TursoSyncConfig.cs
+  s_7e6671464a6479::t_bbac56fbc8b728 70-79
+README.md
+  s_7e6671464a6479::t_eadfe7d24cbe94 64,67-73
+src/TursoSync/TursoSyncDatabase.cs
+  s_7e6671464a6479::t_bbac56fbc8b728 54,99
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "56a73b5e400c8e2287345fd233ebfb34b7b04969",
+  "prompts": {},
+  "sessions": {
+    "s_7e6671464a6479": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18fc9-a9c6-70f2-b343-54d947a23a35",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
