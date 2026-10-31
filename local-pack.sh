@@ -58,8 +58,9 @@ else
     echo "No native found. Set TURSOSYNC_NATIVE_DIR to a folder containing $lib, or TURSO_SRC to a Turso engine checkout." >&2
     exit 1
   fi
+  "$here/scripts/apply-engine-patches.sh" "$turso_src"
   echo "→ building native (release, FTS) from $turso_src ..."
-  cargo build --manifest-path "$turso_src/Cargo.toml" -p turso_sync_sdk_kit --features turso_sdk_kit/fts --release
+  (cd "$turso_src" && cargo build -p turso_sync_sdk_kit --features turso_sdk_kit/fts --release)
   native="$turso_src/target/release/$lib"
 fi
 
