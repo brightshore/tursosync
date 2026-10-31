@@ -1,5 +1,7 @@
 # TursoSync.Dapper
 
+## 1.8.1
+
 ## 1.8.0
 
 No changes in this release.
