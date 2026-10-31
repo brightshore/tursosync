@@ -1,0 +1,29 @@
+local-pack.sh
+  s_39a534ffa60717::t_3c084f6d1790b0 61
+scripts/apply-engine-patches.sh
+  s_39a534ffa60717::t_3c084f6d1790b0 1-6,8-15
+tests/TursoSync.Tests/LiveSyncIntegrationTests.cs
+  s_39a534ffa60717::t_5eb174c632288c 116
+.github/workflows/integration.yml
+  s_39a534ffa60717::t_3c084f6d1790b0 76,90-93
+.github/workflows/release.yml
+  s_39a534ffa60717::t_3c084f6d1790b0 74-77,82
+.changeset/calm-pandas-wander.md
+  s_39a534ffa60717::t_48ac2a1f64869d 1-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "18485f68f8d4a4eaf020f5b6a0f56e80cdf04a34",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
