@@ -1,0 +1,25 @@
+src/TursoSync/CHANGELOG.md
+  s_7e6671464a6479::t_b86c5793e8dfe9 3-7
+src/TursoSync.Dapper/CHANGELOG.md
+  s_7e6671464a6479::t_b86c5793e8dfe9 3-4
+src/TursoSync.DbUp/CHANGELOG.md
+  s_7e6671464a6479::t_b86c5793e8dfe9 3-8
+Directory.Build.props
+  s_7e6671464a6479::t_b86c5793e8dfe9 17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "532d9a82b067dee2b716042acb67a003d707f3e5",
+  "prompts": {},
+  "sessions": {
+    "s_7e6671464a6479": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18fc9-a9c6-70f2-b343-54d947a23a35",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
