@@ -1,5 +1,10 @@
 # TursoSync
 
+## 1.8.2
+### 🩹 Fixes
+
+- Preserve pending local transaction boundaries during pull and replay, so later sync pushes continue draining offline backlogs in bounded batches while each pull remains atomic.
+
 ## 1.8.1
 ### 🩹 Fixes
 
