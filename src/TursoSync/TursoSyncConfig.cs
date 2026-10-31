@@ -67,6 +67,16 @@ public sealed record TursoSyncConfig
     /// <summary>Long-poll timeout (ms) the server holds a pull open waiting for changes; 0 = off.</summary>
     public int LongPollTimeoutMs { get; init; }
 
+    /// <summary>The default number of CDC operations per push batch.</summary>
+    public const int DefaultPushOperationsThreshold = 1000;
+
+    /// <summary>
+    /// Split pushes into HTTP batches once this many CDC operations have accumulated. Batches end only at
+    /// transaction boundaries, so a single larger transaction is never split. Zero sends the whole change set
+    /// in one request. Bounded batches let an offline backlog make progress without one enormous upload.
+    /// </summary>
+    public int PushOperationsThreshold { get; init; } = DefaultPushOperationsThreshold;
+
     /// <summary>The <see cref="HttpTimeoutMs"/> used when it is 0: one minute.</summary>
     public const int DefaultHttpTimeoutMs = 60_000;
 

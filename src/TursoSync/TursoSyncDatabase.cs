@@ -51,6 +51,7 @@ public sealed partial class TursoSyncDatabase : IDisposable
     /// </summary>
     public static TursoSyncDatabase Create(TursoSyncConfig config)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(config.PushOperationsThreshold);
         ArgumentNullException.ThrowIfNull(config);
 
         // Local at-rest encryption is a base-engine feature only. The upstream sync engine never plumbs the
@@ -95,6 +96,7 @@ public sealed partial class TursoSyncDatabase : IDisposable
                 ClientName = strings.Utf8(config.ClientName),
                 LongPollTimeoutMs = config.LongPollTimeoutMs,
                 BootstrapIfEmpty = config.BootstrapIfEmpty,
+                PushOperationsThreshold = (nuint)config.PushOperationsThreshold,
                 PullBytesThreshold = (nuint)Math.Max(0, config.PullBytesThreshold),
             };
 

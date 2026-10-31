@@ -61,8 +61,16 @@ dotnet add package TursoSync.Dapper   # optional: Dapper type handlers
 ## Connection string keys
 
 `Data Source` (required) · `Remote Url` · `Auth Token` · `Namespace` · `Bootstrap` · `Sync` · `Pooling`
-· `Busy Timeout` · `Long Poll Timeout` · `Http Timeout` · `Encryption Cipher` · `Encryption Key`
+· `Busy Timeout` · `Long Poll Timeout` · `Http Timeout` · `Push Operations Threshold` · `Encryption Cipher` · `Encryption Key`
 · `Experimental Index Method`.
+
+## Push batching
+
+Pushes default to batches of 1,000 CDC operations, so a backlog accumulated offline can make progress
+without uploading the entire change set in one request. Set `Push Operations Threshold` in the connection
+string, or `TursoSyncConfig.PushOperationsThreshold`, to change the threshold. Zero explicitly restores
+one request for the whole change set. A batch ends at a transaction boundary, so one larger transaction
+can exceed the threshold. A retry resumes from the last batch the server acknowledged.
 
 ## Sync HTTP diagnostics
 

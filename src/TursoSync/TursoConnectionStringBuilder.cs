@@ -37,6 +37,8 @@ public sealed class TursoConnectionStringBuilder : DbConnectionStringBuilder
         ["LongPollTimeout"] = "Long Poll Timeout",
         ["Http Timeout"] = "Http Timeout",
         ["HttpTimeout"] = "Http Timeout",
+        ["Push Operations Threshold"] = "Push Operations Threshold",
+        ["PushOperationsThreshold"] = "Push Operations Threshold",
         ["Pooling"] = "Pooling",
         ["Max Idle Connections"] = "Max Idle Connections",
         ["MaxIdleConnections"] = "Max Idle Connections",
@@ -129,6 +131,18 @@ public sealed class TursoConnectionStringBuilder : DbConnectionStringBuilder
         set => this["Http Timeout"] = value;
     }
 
+    /// <summary>CDC operations per push HTTP batch (default 1000); zero sends the whole change set. Batches
+    /// never split a transaction. See <see cref="TursoSyncConfig.PushOperationsThreshold"/>.</summary>
+    public int PushOperationsThreshold
+    {
+        get => GetInt("Push Operations Threshold", TursoSyncConfig.DefaultPushOperationsThreshold);
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            this["Push Operations Threshold"] = value;
+        }
+    }
+
     /// <summary>Whether physical connections are pooled and reused (default true).</summary>
     public bool Pooling
     {
@@ -180,6 +194,7 @@ public sealed class TursoConnectionStringBuilder : DbConnectionStringBuilder
                 BusyTimeout.ToString(CultureInfo.InvariantCulture),
                 LongPollTimeout.ToString(CultureInfo.InvariantCulture),
                 HttpTimeout.ToString(CultureInfo.InvariantCulture),
+                PushOperationsThreshold.ToString(CultureInfo.InvariantCulture),
                 Sync ? "1" : "0",
                 EncryptionCipher,
                 EncryptionKey,
@@ -297,6 +312,7 @@ public sealed class TursoConnectionStringBuilder : DbConnectionStringBuilder
             BootstrapIfEmpty = GetBool("Bootstrap"),
             LongPollTimeoutMs = GetInt("Long Poll Timeout", 0),
             HttpTimeoutMs = GetInt("Http Timeout", 0),
+            PushOperationsThreshold = PushOperationsThreshold,
             BusyTimeoutMs = GetInt("Busy Timeout", 5000),
             SchemaGuard = ParseSchemaGuard(GetOption("Schema Guard")),
             EncryptionCipher = NullIfEmpty(GetOption("Encryption Cipher")),
