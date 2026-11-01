@@ -122,6 +122,41 @@ public class LiveSyncIntegrationTests
     }
 
     [TestMethod]
+    [DataRow("TEXT", "'lane'")]
+    [DataRow("INTEGER", "1")]
+    public void LiveSync_Pull_Replays_Parent_Updates_Without_Deleting_Them(string keyType, string key)
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote(
+            $"CREATE TABLE lane (id {keyType} PRIMARY KEY, status TEXT)",
+            $"CREATE TABLE file_edit (lane_id {keyType} REFERENCES lane(id))",
+            "CREATE TABLE pulse (value TEXT)",
+            $"INSERT INTO lane VALUES ({key}, 'old')",
+            $"INSERT INTO file_edit VALUES ({key})");
+        var dbPath = TempDb();
+        try
+        {
+            using var db = TursoSyncDatabase.Create(SyncConfig(dbPath, server));
+            using var conn = TursoRawConnection.Open(db);
+            conn.Execute("PRAGMA foreign_keys=ON");
+            conn.Execute($"INSERT INTO lane VALUES ({key}, 'new') ON CONFLICT(id) DO UPDATE SET status=excluded.status");
+            server.ExecRemote("INSERT INTO pulse VALUES ('remote')");
+
+            db.Pull().Should().BeTrue();
+
+            conn.QueryScalar("SELECT status FROM lane").Should().Be("new");
+            conn.QueryScalar("SELECT count(*) FROM file_edit").Should().Be(1L);
+            conn.QueryScalar("SELECT count(*) FROM turso_cdc WHERE table_name='lane' AND change_type=-1")
+                .Should().Be(0L, "replaying an update must not turn it into a parent deletion");
+            db.Push();
+            db.Stats().CdcOperations.Should().Be(0);
+            RemoteValues(server, "SELECT status FROM lane").Should().Equal("new");
+            RemoteValues(server, "SELECT count(*) FROM file_edit").Should().Equal("1");
+        }
+        finally { Cleanup(dbPath); }
+    }
+
+    [TestMethod]
     public void LiveSync_Checkpoint_TruncatesWal_AndStatsReflectIt()
     {
         using var server = StartServerOrSkip();

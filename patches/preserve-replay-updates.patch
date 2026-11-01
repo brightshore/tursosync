@@ -1,0 +1,347 @@
+diff --git a/sync/engine/src/database_tape.rs b/sync/engine/src/database_tape.rs
+--- a/sync/engine/src/database_tape.rs
++++ b/sync/engine/src/database_tape.rs
+@@ -805,6 +805,51 @@
+                             after,
+                             updates: None,
+                         } => {
++                            let insert_key =
++                                self.populate_insert_stmt(coro, table, after.len()).await?;
++                            let info = &self.cached_insert_stmt.get(&insert_key).unwrap().info;
++                            let stable_key = DatabaseReplayGenerator::same_primary_key(
++                                info, &before, change.id, &after, change.id,
++                            );
++                            if stable_key {
++                                let mut columns = vec![true; after.len()];
++                                if let Some(column) = info.rowid_alias_pk_column_index {
++                                    columns[column] = false;
++                                }
++                                if columns.iter().any(|&column| column) {
++                                    let mut updates = crate::alloc::Vec::new();
++                                    updates.extend(columns.iter().map(|&column| {
++                                        turso_core::Value::from_i64(i64::from(column))
++                                    }));
++                                    updates.extend(after.iter().cloned());
++                                    let key =
++                                        self.populate_update_stmt(coro, table, &columns).await?;
++                                    let cached = self.cached_update_stmt.get_mut(&key).unwrap();
++                                    let values = self.generator.replay_values(
++                                        &cached.info,
++                                        DatabaseChangeType::Update,
++                                        change.id,
++                                        after.clone(),
++                                        Some(updates),
++                                        Some(before),
++                                    );
++                                    replay_stmt(coro, &mut cached.stmt, values).await?;
++                                    if self.conn.changes() > 0 {
++                                        return Ok(());
++                                    }
++                                }
++                                let cached = self.cached_insert_stmt.get_mut(&insert_key).unwrap();
++                                let values = self.generator.replay_values(
++                                    &cached.info,
++                                    DatabaseChangeType::Insert,
++                                    change.id,
++                                    after,
++                                    None,
++                                    None,
++                                );
++                                replay_stmt(coro, &mut cached.stmt, values).await?;
++                                return Ok(());
++                            }
+                             let use_rowid = self.generator.delete_uses_rowid(&before, None)?;
+                             let key = self.populate_delete_stmt(coro, table, use_rowid).await?;
+                             tracing::trace!(
+@@ -3798,10 +3843,125 @@
+         );
+     }
+ 
++    #[test]
++    fn full_update_replay_preserves_referenced_rows_and_cdc_update() {
++        for action in ["NO ACTION", "CASCADE"] {
++            let child = format!("CREATE TABLE child(id INTEGER PRIMARY KEY, parent TEXT REFERENCES parent(id) ON DELETE {action})");
++            let rows = replay_with_foreign_keys(
++                &[
++                    "CREATE TABLE parent(id TEXT PRIMARY KEY, value TEXT, other TEXT)",
++                    &child,
++                    "INSERT INTO parent VALUES ('lane', 'old', 'remote')",
++                    "INSERT INTO child VALUES (1, 'lane')",
++                    "DELETE FROM turso_cdc",
++                ],
++                vec![DatabaseTapeOperation::RowChange(DatabaseTapeRowChange {
++                    change_id: 1,
++                    change_time: 0,
++                    table_name: "parent".to_string(),
++                    id: 1,
++                    change: DatabaseTapeRowChangeType::Update {
++                        before: crate::alloc::vec![text("lane"), text("old"), text("original")],
++                        after: crate::alloc::vec![text("lane"), text("new"), text("original")],
++                        updates: None,
++                    },
++                })],
++                "SELECT value, other, (SELECT count(*) FROM child), (SELECT count(*) FROM turso_cdc WHERE table_name='parent' AND change_type=-1) FROM parent",
++                true,
++            ).unwrap();
++            assert_eq!(
++                rows,
++                vec![vec![
++                    text("new"),
++                    text("original"),
++                    turso_core::Value::from_i64(1),
++                    turso_core::Value::from_i64(0)
++                ]]
++            );
++        }
++    }
++
++    #[test]
++    fn full_update_replay_handles_integer_keys_and_missing_rows() {
++        for existing in [false, true] {
++            let rows = replay_with_foreign_keys(
++                &[
++                    "CREATE TABLE parent(id INTEGER PRIMARY KEY, value TEXT)",
++                    if existing { "INSERT INTO parent VALUES (1, 'old')" } else { "SELECT 1" },
++                    "DELETE FROM turso_cdc",
++                ],
++                vec![DatabaseTapeOperation::RowChange(DatabaseTapeRowChange {
++                    change_id: 1,
++                    change_time: 0,
++                    table_name: "parent".to_string(),
++                    id: 1,
++                    change: DatabaseTapeRowChangeType::Update {
++                        before: crate::alloc::vec![turso_core::Value::Null, text("old")],
++                        after: crate::alloc::vec![turso_core::Value::Null, text("new")],
++                        updates: None,
++                    },
++                })],
++                "SELECT id, value, (SELECT count(*) FROM turso_cdc WHERE table_name='parent' AND change_type=-1) FROM parent",
++                true,
++            ).unwrap();
++            assert_eq!(
++                rows,
++                vec![vec![
++                    turso_core::Value::from_i64(1),
++                    text("new"),
++                    turso_core::Value::from_i64(0)
++                ]]
++            );
++        }
++    }
++
++    #[test]
++    fn full_update_replay_of_key_only_table_does_not_delete_children() {
++        let rows = replay_with_foreign_keys(
++            &[
++                "CREATE TABLE parent(id INTEGER PRIMARY KEY)",
++                "CREATE TABLE child(parent INTEGER REFERENCES parent(id) ON DELETE CASCADE)",
++                "INSERT INTO parent VALUES (1)",
++                "INSERT INTO child VALUES (1)",
++                "DELETE FROM turso_cdc",
++            ],
++            vec![DatabaseTapeOperation::RowChange(DatabaseTapeRowChange {
++                change_id: 1,
++                change_time: 0,
++                table_name: "parent".to_string(),
++                id: 1,
++                change: DatabaseTapeRowChangeType::Update {
++                    before: crate::alloc::vec![turso_core::Value::Null],
++                    after: crate::alloc::vec![turso_core::Value::Null],
++                    updates: None,
++                },
++            })],
++            "SELECT (SELECT count(*) FROM parent), (SELECT count(*) FROM child)",
++            true,
++        )
++        .unwrap();
++        assert_eq!(
++            rows,
++            vec![vec![
++                turso_core::Value::from_i64(1),
++                turso_core::Value::from_i64(1)
++            ]]
++        );
++    }
++
+     fn replay_on_table_with_generated_columns(
+         setup: &[&str],
+         operations: Vec<DatabaseTapeOperation>,
+         query: &str,
++    ) -> crate::Result<Vec<Vec<turso_core::Value>>> {
++        replay_with_foreign_keys(setup, operations, query, false)
++    }
++
++    fn replay_with_foreign_keys(
++        setup: &[&str],
++        operations: Vec<DatabaseTapeOperation>,
++        query: &str,
++        foreign_keys: bool,
+     ) -> crate::Result<Vec<Vec<turso_core::Value>>> {
+         let temp_file = NamedTempFile::new()?;
+         let db_path = temp_file.path().to_str().unwrap();
+@@ -3827,6 +3987,9 @@
+                     use_implicit_rowid: false,
+                 };
+                 let mut session = db.start_replay_session(&coro, opts).await.unwrap();
++                if foreign_keys {
++                    session.conn.execute("PRAGMA foreign_keys=ON").unwrap();
++                }
+                 for operation in operations {
+                     session.replay(&coro, operation).await?;
+                 }
+diff --git a/sync/engine/src/database_replay_generator.rs b/sync/engine/src/database_replay_generator.rs
+--- a/sync/engine/src/database_replay_generator.rs
++++ b/sync/engine/src/database_replay_generator.rs
+@@ -539,15 +539,22 @@
+                 pk_column_names.push(quote_ident(&record_columns[idx]));
+             }
+             let mut update_clauses = Vec::new();
+-            for name in record_columns {
++            for (index, name) in record_columns.iter().enumerate() {
++                if Some(index) == rowid_alias_pk_column_index {
++                    continue;
++                }
+                 let name = quote_ident(name);
+                 update_clauses.push(format!("{name} = excluded.{name}"));
+             }
+-            format!(
+-                " ON CONFLICT({}) DO UPDATE SET {}",
+-                pk_column_names.join(","),
+-                update_clauses.join(",")
+-            )
++            if update_clauses.is_empty() {
++                format!(" ON CONFLICT({}) DO NOTHING", pk_column_names.join(","))
++            } else {
++                format!(
++                    " ON CONFLICT({}) DO UPDATE SET {}",
++                    pk_column_names.join(","),
++                    update_clauses.join(",")
++                )
++            }
+         } else {
+             String::new()
+         };
+@@ -896,6 +903,25 @@
+ 
+     /// Returns which columns can be INSERTed or UPDATEd, skipping generated columns.
+     /// Returns `(Vec<col_name>, Vec<pk_column_indices>, Option<rowid_alias_pk_column_index>)`
++    pub(crate) fn same_primary_key(
++        info: &ReplayInfo,
++        before: &[turso_core::Value],
++        before_rowid: i64,
++        after: &[turso_core::Value],
++        after_rowid: i64,
++    ) -> bool {
++        let Some(columns) = info.pk_column_indices.as_ref().filter(|p| !p.is_empty()) else {
++            return false;
++        };
++        columns.iter().all(|&column| {
++            if Some(column) == info.rowid_alias_pk_column_index {
++                before_rowid == after_rowid
++            } else {
++                matches!((before.get(column), after.get(column)), (Some(a), Some(b)) if !matches!(a, turso_core::Value::Null) && a == b)
++            }
++        })
++    }
++
+     async fn writable_columns<Ctx>(
+         &self,
+         coro: &Coro<Ctx>,
+diff --git a/sync/engine/src/database_sync_operations.rs b/sync/engine/src/database_sync_operations.rs
+--- a/sync/engine/src/database_sync_operations.rs
++++ b/sync/engine/src/database_sync_operations.rs
+@@ -2946,6 +2946,8 @@
+     let threshold = opts.push_operations_threshold.filter(|t| *t > 0);
+     let mut changes = source.iterate_changes(iterate_opts)?;
+     let mut batch: Vec<DatabaseTapeRowChange> = Vec::new();
++    let mut transaction_start = 0;
++    let mut batch_operations = 0;
+     let mut total_rows_changed: i64 = 0;
+ 
+     let mut next_operation = changes.next(ctx.coro).await?;
+@@ -2968,11 +2970,19 @@
+                     continue;
+                 }
+                 batch.push(change);
++                batch_operations += 1;
+             }
+             DatabaseTapeOperation::Commit => {
++                if !opts.use_transform {
++                    let transaction = batch.split_off(transaction_start);
++                    batch.extend(
++                        merge_replacement_updates(ctx.coro, &generator, transaction).await?,
++                    );
++                }
++                transaction_start = batch.len();
+                 // push batch if we reach threshold OR if this is last operation
+                 let must_push =
+-                    threshold.is_some_and(|t| batch.len() >= t) || next_operation.is_none();
++                    threshold.is_some_and(|t| batch_operations >= t) || next_operation.is_none();
+                 if !must_push {
+                     continue;
+                 }
+@@ -2989,6 +2999,8 @@
+                 total_rows_changed += rows_changed;
+                 last_change_id = Some(next_change_id);
+                 batch.clear();
++                batch_operations = 0;
++                transaction_start = 0;
+             }
+         }
+     }
+@@ -3007,6 +3019,55 @@
+         replay_floor_change_id,
+         last_change_id.unwrap_or(0),
+     ))
++}
++
++async fn merge_replacement_updates<Ctx>(
++    coro: &Coro<Ctx>,
++    generator: &DatabaseReplayGenerator,
++    transaction: Vec<DatabaseTapeRowChange>,
++) -> Result<Vec<DatabaseTapeRowChange>> {
++    let mut normalized = Vec::with_capacity(transaction.len());
++    let mut changes = transaction.into_iter().peekable();
++    while let Some(change) = changes.next() {
++        let merge = if let (DatabaseTapeRowChangeType::Delete { before, key: None }, Some(next)) =
++            (&change.change, changes.peek())
++        {
++            if change.table_name == next.table_name && change.table_name != SQLITE_SCHEMA_TABLE {
++                if let DatabaseTapeRowChangeType::Insert { after } = &next.change {
++                    let info = generator.replay_info(coro, next).await?;
++                    DatabaseReplayGenerator::same_primary_key(
++                        &info, before, change.id, after, next.id,
++                    )
++                } else {
++                    false
++                }
++            } else {
++                false
++            }
++        } else {
++            false
++        };
++        if merge {
++            let DatabaseTapeRowChangeType::Delete { before, .. } = change.change else {
++                unreachable!()
++            };
++            let next = changes.next().unwrap();
++            let DatabaseTapeRowChangeType::Insert { after } = next.change else {
++                unreachable!()
++            };
++            normalized.push(DatabaseTapeRowChange {
++                change: DatabaseTapeRowChangeType::Update {
++                    before,
++                    after,
++                    updates: None,
++                },
++                ..next
++            });
++        } else {
++            normalized.push(change);
++        }
++    }
++    Ok(normalized)
+ }
+ 
+ /// Build and send a single push batch over HTTP. The caller owns the

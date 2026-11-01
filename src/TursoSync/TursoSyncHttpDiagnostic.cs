@@ -12,7 +12,7 @@ public enum TursoSyncHttpFailurePhase
 /// One HTTP completion event. Contains no URL, query, headers, credentials, payload or exception text.
 /// Method and endpoint are allowlisted labels; unknown values become OTHER and other respectively.
 /// Timings exclude the diagnostics callback. Response bytes count bytes successfully read, including partial
-/// reads before failure, not wire overhead. Null means that measurement was unavailable.
+/// reads before failure, before gzip decompression and excluding wire overhead. Null means that measurement was unavailable.
 /// </summary>
 /// <param name="Method">Standard HTTP method, or OTHER.</param>
 /// <param name="Endpoint">info, pull-updates, push-updates, or other; never an arbitrary path.</param>

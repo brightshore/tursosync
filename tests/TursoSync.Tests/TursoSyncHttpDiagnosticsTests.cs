@@ -1,4 +1,5 @@
 using System.Net;
+using System.IO.Compression;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -9,6 +10,76 @@ namespace TursoSync.Tests;
 [TestClass]
 public class TursoSyncHttpDiagnosticsTests
 {
+    [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task GzipCompletion_DecodesBody_AndCountsCompressedBytes(bool captureDiagnostics)
+    {
+        var text = string.Concat(Enumerable.Repeat("database page payload\0", 2000));
+        var compressed = Gzip(text);
+        await using var server = new StubServer(async (stream, token) =>
+        {
+            await Write(stream, $"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {compressed.Length}\r\nConnection: close\r\n\r\n", token);
+            await stream.WriteAsync(compressed, token);
+        });
+        var events = new List<TursoSyncHttpDiagnostic>();
+
+        Send(server, captureDiagnostics ? events.Add : null).Should().Be((200, text));
+
+        if (captureDiagnostics)
+        {
+            var diagnostic = events.Should().ContainSingle().Subject;
+            diagnostic.DeclaredResponseBytes.Should().Be(compressed.Length);
+            diagnostic.ActualResponseBytes.Should().Be(compressed.Length);
+            diagnostic.ActualResponseBytes.Should().BeLessThan(Encoding.UTF8.GetByteCount(text));
+            diagnostic.FailurePhase.Should().Be(TursoSyncHttpFailurePhase.None);
+        }
+        else
+        {
+            events.Should().BeEmpty();
+        }
+    }
+
+    [TestMethod]
+    public async Task StalledGzipBody_PreservesIdleTimeout_AndCountsPartialCompressedBytes()
+    {
+        var compressed = Gzip("hello");
+        await using var server = new StubServer(async (stream, token) =>
+        {
+            await Write(stream, $"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {compressed.Length}\r\nConnection: close\r\n\r\n", token);
+            await stream.WriteAsync(compressed.AsMemory(0, 10), token);
+            await Task.Delay(Timeout.Infinite, token);
+        });
+        var events = new List<TursoSyncHttpDiagnostic>();
+
+        Action send = () => Send(server, events.Add, timeoutMs: 500);
+        send.Should().Throw<TimeoutException>().WithMessage("the response body stopped arriving");
+
+        var diagnostic = events.Should().ContainSingle().Subject;
+        diagnostic.ActualResponseBytes.Should().Be(10);
+        diagnostic.FailurePhase.Should().Be(TursoSyncHttpFailurePhase.ResponseBody);
+    }
+
+    [TestMethod]
+    public async Task CorruptGzipBody_ReportsDecompressionFailure()
+    {
+        var compressed = Gzip("hello");
+        compressed[^8] ^= 0xff; // corrupt the CRC, retaining a valid gzip header and deflate payload
+        await using var server = new StubServer(async (stream, token) =>
+        {
+            await Write(stream, $"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {compressed.Length}\r\nConnection: close\r\n\r\n", token);
+            await stream.WriteAsync(compressed, token);
+        });
+        var events = new List<TursoSyncHttpDiagnostic>();
+
+        Action send = () => Send(server, events.Add);
+        send.Should().Throw<InvalidDataException>();
+
+        var diagnostic = events.Should().ContainSingle().Subject;
+        diagnostic.ActualResponseBytes.Should().Be(compressed.Length);
+        diagnostic.FailurePhase.Should().Be(TursoSyncHttpFailurePhase.ResponseBody);
+    }
+
     [TestMethod]
     public async Task NormalCompletion_ReportsSafeMetadataAndPreservesResponse()
     {
@@ -158,6 +229,16 @@ public class TursoSyncHttpDiagnosticsTests
     {
         await stream.WriteAsync(Encoding.ASCII.GetBytes(value), token);
         await stream.FlushAsync(token);
+    }
+
+    private static byte[] Gzip(string value)
+    {
+        using var output = new MemoryStream();
+        using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true))
+        {
+            gzip.Write(Encoding.UTF8.GetBytes(value));
+        }
+        return output.ToArray();
     }
 
     // A single-request raw HTTP server avoids platform-specific HttpListener behavior and needs no native engine.

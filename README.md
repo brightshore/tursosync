@@ -110,6 +110,10 @@ text is included. Null measurements mean unavailable; partial body bytes survive
 read failure. HTTP error statuses are reported unchanged and are not themselves
 transport failures. Existing sync error handling and timeouts are unchanged.
 
+The transport negotiates gzip and decompresses responses as they arrive. HTTP diagnostics
+count compressed response bytes; the native `TursoStats.NetworkReceivedBytes` counter counts
+the decoded payload. Read idle timeouts still apply to network reads below decompression.
+
 Callbacks run synchronously under the sync operation lock; keep them fast and do
 not call back into the database. Callback exceptions are swallowed. Timings exclude
 the callback. Events arrive on completion, not while a request is stalled; an
@@ -134,6 +138,13 @@ already collapsed by an earlier engine cannot regain its lost boundaries. Set
 The pinned 0.8.3 engine also includes the upstream [CDC upsert fix](https://github.com/tursodatabase/turso/pull/10159).
 It captures the previous row before an `ON CONFLICT DO UPDATE` overwrites it. Reading that row afterward
 could produce an incorrect before-image or fail with invalid text/blob errors on sync replicas.
+
+Full-image replay updates rows with stable, non-null primary keys in place, retaining child
+references. Push also combines an adjacent DELETE/INSERT pair for the same key within one
+source transaction into an upsert, so replacement pairs already queued by older replayers can
+finish uploading. This normalization applies to the standard push path without a custom row
+transform. It never combines changes across source transactions, and the acknowledgment uses
+the original insert's CDC change ID. Foreign-key checks remain enabled.
 
 ## Full-text search
 
