@@ -320,6 +320,82 @@ public class LiveSyncIntegrationTests
         }
     }
 
+    /// <summary>
+    /// Reads on other connections while a pull APPLIES its changes. An application's store saw autocommit reads fail with
+    /// <c>statement_step: database is locked</c> 0-3 ms after they began, every time with a pull applying, and
+    /// never waited out the 5 s busy timeout. A read lost to contention should wait for the lock like any other busy
+    /// step, so none may fail as busy here. Several rounds, each with a local write pending (the apply rolls it back
+    /// and replays it) and a batch of remote rows to apply, so the apply is long enough to be read across.
+    /// </summary>
+    [TestMethod]
+    public async Task LiveSync_Reads_During_A_Pull_Apply_Wait_Rather_Than_Fail_Busy()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (x TEXT)", "INSERT INTO t VALUES ('seed')");
+
+        var dbPath = TempDb();
+        var connString = $"Data Source={dbPath};Remote Url={server.BaseUrl};Bootstrap=true;Max Idle Connections=8";
+        var busy = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        long reads = 0;
+        try
+        {
+            TursoSyncDatabase db;
+            using (var first = new TursoConnection(connString))
+            {
+                first.Open();
+                db = first.SyncDatabase!;
+            }
+
+            for (var round = 0; round < 5; round++)
+            {
+                server.ExecRemote(Enumerable.Range(0, 300).Select(_ => "INSERT INTO t VALUES (hex(randomblob(512)))").ToArray());
+                using (var writer = new TursoConnection(connString))
+                {
+                    writer.Open();
+                    using var insert = writer.CreateCommand();
+                    insert.CommandText = $"INSERT INTO t VALUES ('local-{round}')";
+                    insert.ExecuteNonQuery();
+                }
+
+                using var stop = new CancellationTokenSource();
+                var r = round;
+                var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+                {
+                    using var c = new TursoConnection(connString);
+                    c.Open();
+                    while (!stop.IsCancellationRequested)
+                    {
+                        var watch = Stopwatch.StartNew();
+                        try
+                        {
+                            using var cmd = c.CreateCommand();
+                            cmd.CommandText = "SELECT count(*) FROM t";
+                            cmd.ExecuteScalar();
+                            Interlocked.Increment(ref reads);
+                        }
+                        catch (TursoException ex) when (ex.IsBusy)
+                        {
+                            busy.Enqueue($"round {r}: {ex.Message} after {watch.ElapsedMilliseconds} ms");
+                        }
+                    }
+                })).ToList();
+
+                (await Task.Run(db.Pull)).Should().BeTrue("each round has remote rows to apply");
+                stop.Cancel();
+                await Task.WhenAll(readers);
+            }
+
+            Interlocked.Read(ref reads).Should().BePositive("the readers must have run alongside the pulls");
+            busy.Should().BeEmpty("a read contending with a pull's apply waits for the lock rather than failing busy ({0} of {1} reads failed: {2})",
+                busy.Count, Interlocked.Read(ref reads) + busy.Count, string.Join("; ", busy));
+        }
+        finally
+        {
+            TursoConnection.ClearPool();
+            Cleanup(dbPath);
+        }
+    }
+
     // ---- harness ---------------------------------------------------------------------------------
 
     private static async Task WaitUntil(Func<bool> condition, TimeSpan timeout)

@@ -165,9 +165,21 @@ public sealed class TursoRawConnection : IDisposable
 
     private TursoRawStatement PrepareOnce(string sql)
     {
-        var status = TursoNative.ConnectionPrepareSingle(_connection, sql, out var stmt, out var errorPtr);
+        var gate = _syncDatabase?.ApplyGate;
+        gate?.EnterReadLock();
+        TursoStatus status;
+        IntPtr stmt, errorPtr;
+        try
+        {
+            status = TursoNative.ConnectionPrepareSingle(_connection, sql, out stmt, out errorPtr);
+        }
+        finally
+        {
+            gate?.ExitReadLock();
+        }
+
         TursoSyncDatabase.Check(status, errorPtr, "prepare_single");
-        return new TursoRawStatement(stmt, _pump);
+        return new TursoRawStatement(stmt, _pump, gate);
     }
 
     /// <summary>Execute non-query SQL and return rows affected.</summary>
@@ -312,13 +324,29 @@ public sealed class TursoRawConnection : IDisposable
 public sealed class TursoRawStatement : IDisposable
 {
     private readonly Action? _pump;
+    private readonly ReaderWriterLockSlim? _applyGate;
     private IntPtr _statement;
     private bool _disposed;
 
-    internal TursoRawStatement(IntPtr statement, Action? pump)
+    internal TursoRawStatement(IntPtr statement, Action? pump, ReaderWriterLockSlim? applyGate = null)
     {
         _statement = statement;
         _pump = pump;
+        _applyGate = applyGate;
+    }
+
+    /// <summary>One native step, taking turns with a pull's apply (<see cref="TursoSyncDatabase.ApplyGate"/>).</summary>
+    private TursoStatus StepOnce(out IntPtr errorPtr)
+    {
+        _applyGate?.EnterReadLock();
+        try
+        {
+            return TursoNative.StatementStep(_statement, out errorPtr);
+        }
+        finally
+        {
+            _applyGate?.ExitReadLock();
+        }
     }
 
     /// <summary>Advance one row. Returns true on a row, false when the statement is done.</summary>
@@ -327,7 +355,7 @@ public sealed class TursoRawStatement : IDisposable
         ThrowIfDisposed();
         while (true)
         {
-            var status = TursoNative.StatementStep(_statement, out var errorPtr);
+            var status = StepOnce(out var errorPtr);
             switch (status)
             {
                 case TursoStatus.Row:
