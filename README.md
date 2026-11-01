@@ -78,9 +78,9 @@ threshold is rejected when opening a connection. Close the existing connections 
 
 ## Sync HTTP diagnostics
 
-The opt-in HTTP diagnostics API requires **TursoSync 1.8.0 or later** (the next minor
-release; 1.7.x does not contain it). This change does not publish a package. Consumers
-such as Foxery must upgrade their TursoSync reference after that release is published.
+The opt-in HTTP diagnostics API requires **TursoSync 1.8.0 or later**. Automatic gzip
+response decompression is available from **1.9.2**. Applications must upgrade their
+TursoSync package reference to use these features.
 
 Set `TursoSyncConfig.HttpDiagnostics` before `TursoSyncDatabase.Create` to include
 bootstrap requests, or use `TursoSyncDatabase.HttpDiagnostics` on an open replica to
