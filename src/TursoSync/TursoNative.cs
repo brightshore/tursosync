@@ -75,6 +75,14 @@ internal struct TursoDatabaseConfig
     public IntPtr Vfs;
     public IntPtr EncryptionCipher;
     public IntPtr EncryptionHexKey;
+
+    /// <summary>Engine 0.8+: optional <c>const turso_page_codec_v1_t*</c>; always null here (no external codec).</summary>
+    public IntPtr PageCodec;
+
+    /// <summary>Engine 0.8+: <c>turso_database_open_flags_t</c> bitmask; always 0 (<c>TURSO_DATABASE_OPEN_DEFAULT</c>).
+    /// Without these two trailing fields a 0.8 engine reads whatever follows the struct as its flags and refuses
+    /// every open with "unknown database open flags".</summary>
+    public uint OpenFlags;
 }
 
 /// <summary>
