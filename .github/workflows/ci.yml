@@ -35,6 +35,10 @@ jobs:
             9.0.x
             10.0.x
 
+      - name: Test engine patch application
+        shell: bash
+        run: bash scripts/test-engine-patches.sh
+
       - name: Restore
         run: dotnet restore TursoSync.slnx
 

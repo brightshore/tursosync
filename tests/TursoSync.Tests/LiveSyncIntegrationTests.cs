@@ -82,6 +82,46 @@ public class LiveSyncIntegrationTests
     }
 
     [TestMethod]
+    public void LiveSync_Pull_Preserves_Transactions_Then_Push_Drains_In_Batches()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT)");
+        var dbPath = TempDb();
+        try
+        {
+            using var db = TursoSyncDatabase.Create(SyncConfig(dbPath, server) with
+            {
+                PushOperationsThreshold = 2,
+            });
+            using var conn = TursoRawConnection.Open(db);
+            for (var id = 1; id <= 3; id++) conn.Execute($"INSERT INTO t VALUES ({id}, 'local')");
+            conn.Execute("BEGIN");
+            for (var id = 4; id <= 6; id++) conn.Execute($"INSERT INTO t VALUES ({id}, 'transaction')");
+            conn.Execute("COMMIT");
+            conn.Execute("INSERT INTO t VALUES (7, 'last')");
+            server.ExecRemote("INSERT INTO t VALUES (100, 'remote')");
+
+            db.Pull().Should().BeTrue();
+
+            // Inspect the actual recaptured CDC, including the transaction larger than the threshold.
+            conn.QueryScalar("SELECT max(n) FROM (SELECT count(*) AS n FROM turso_cdc " +
+                             "WHERE table_name='t' AND change_type<>2 GROUP BY change_txn_id)")
+                .Should().Be(3L, "a pull must not collapse the seven local writes into one transaction");
+            var requests = new List<TursoSyncHttpDiagnostic>();
+            db.HttpDiagnostics = requests.Add;
+            db.Push();
+            requests.Count(r => r.Method == "POST").Should().BeGreaterThan(2,
+                "the native push must split the replayed backlog into multiple HTTP batches");
+            RemoteValues(server, "SELECT id FROM t ORDER BY id")
+                .Should().Equal("1", "2", "3", "4", "5", "6", "7", "100");
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
+    }
+
+    [TestMethod]
     public void LiveSync_Checkpoint_TruncatesWal_AndStatsReflectIt()
     {
         using var server = StartServerOrSkip();

@@ -140,6 +140,64 @@ public class TursoPushBatchingTests
         });
     }
 
+    [TestMethod]
+    [DataRow(0)]
+    [DataRow(1)]
+    [DataRow(2)]
+    public async Task A_Statement_Constraint_Failure_Rolls_Back_The_Batch_And_Its_Watermark(int failedRow)
+    {
+        await WithReplica(0, (db, conn, server) =>
+        {
+            for (var i = 0; i < 3; i++) conn.Execute($"INSERT INTO items VALUES ('batch-row-{i}')");
+            var acknowledged = server.Watermark;
+            server.FailStatementRow = $"batch-row-{failedRow}";
+            Action push = db.Push;
+            var error = push.Should().Throw<TursoException>().Which;
+            server.Batches.Should().BeEmpty("a statement error must roll back all rows in this batch");
+            server.Watermark.Should().Be(acknowledged, "a failed batch must remain retryable");
+            error.Message.Should().Contain("table=items").And.Contain("change_id=");
+
+            server.FailStatementRow = null;
+            db.Push();
+            server.Batches.SelectMany(b => b).Should().Equal("batch-row-0", "batch-row-1", "batch-row-2");
+        });
+    }
+
+    [TestMethod]
+    public async Task A_Statement_Failure_Preserves_Previously_Acknowledged_Batches()
+    {
+        await WithReplica(2, (db, conn, server) =>
+        {
+            for (var i = 0; i < 5; i++) conn.Execute($"INSERT INTO items VALUES ('batch-row-{i}')");
+            server.FailStatementRow = "batch-row-3";
+            Action push = db.Push;
+            push.Should().Throw<TursoException>();
+            server.Batches.SelectMany(b => b).Should().Equal("batch-row-0", "batch-row-1");
+            server.FailStatementRow = null;
+            db.Push();
+            server.Batches.SelectMany(b => b).Should().Equal(Enumerable.Range(0, 5).Select(i => $"batch-row-{i}"));
+        });
+    }
+
+    [TestMethod]
+    public async Task A_Commit_Failure_Rolls_Back_The_Remote_Transaction_And_Preserves_The_Watermark()
+    {
+        await WithReplica(0, (db, conn, server) =>
+        {
+            conn.Execute("INSERT INTO items VALUES ('batch-row-0')");
+            var acknowledged = server.Watermark;
+            server.FailCommit = true;
+            Action push = db.Push;
+            push.Should().Throw<TursoException>();
+            server.Batches.Should().BeEmpty();
+            server.Watermark.Should().Be(acknowledged);
+            server.LastBatchLeftTransactionOpen.Should().BeFalse("a failed COMMIT must release the remote write transaction");
+            server.FailCommit = false;
+            db.Push();
+            server.Batches.SelectMany(b => b).Should().Equal("batch-row-0");
+        });
+    }
+
     private static async Task WithReplica(int? threshold, Action<TursoSyncDatabase, TursoRawConnection, PushRemote> test)
     {
         if (!TursoNativeLibrary.IsAvailable()) Assert.Inconclusive("turso_sync_sdk_kit native library not found");
@@ -173,6 +231,10 @@ public class TursoPushBatchingTests
         public string Url { get; }
         public List<string[]> Batches { get; } = [];
         public int? FailBatch { get; set; }
+        public string? FailStatementRow { get; set; }
+        public bool FailCommit { get; set; }
+        public bool LastBatchLeftTransactionOpen { get; private set; }
+        public string? Watermark => _watermark is null ? null : JsonSerializer.Serialize(_watermark);
 
         public PushRemote()
         {
@@ -202,29 +264,16 @@ public class TursoPushBatchingTests
                     await stream.ReadExactlyAsync(body, _stop.Token);
                     using var request = JsonDocument.Parse(body);
                     var steps = request.RootElement.GetProperty("requests")[0].GetProperty("batch").GetProperty("steps");
-                    var select = steps.GetArrayLength() == 1;
                     var rows = steps.EnumerateArray().SelectMany(s => s.GetProperty("stmt").GetProperty("args").EnumerateArray())
                         .Where(a => a.GetProperty("type").GetString() == "text")
                         .Select(a => a.GetProperty("value").GetString()!)
                         .Where(v => v.StartsWith("batch-row-", StringComparison.Ordinal)).ToArray();
                     var fail = rows.Length > 0 && FailBatch == Batches.Count + 1;
-                    if (!select && !fail)
-                    {
-                        if (rows.Length > 0) Batches.Add(rows);
-                        var watermark = steps.EnumerateArray().Select(s => s.GetProperty("stmt"))
-                            .Single(s => s.GetProperty("sql").GetString()!.Contains("INSERT INTO turso_sync_last_change_id", StringComparison.OrdinalIgnoreCase));
-                        _watermark = watermark.GetProperty("args").EnumerateArray().Skip(1).Select(a => a.Clone()).ToArray();
-                    }
-                    object[] values = select && _watermark is not null ? [ _watermark ] : [];
-                    var result = new { cols = Array.Empty<object>(), rows = values, affected_row_count = 0, last_insert_rowid = (string?)null };
+                    var result = fail ? null : ExecuteBatch(steps);
                     var responseBody = fail ? "rejected batch" : JsonSerializer.Serialize(new
                     {
                         baton = (string?)null, base_url = (string?)null,
-                        results = new[] { new { type = "ok", response = new { type = "batch", result = new
-                        {
-                            step_results = Enumerable.Repeat(result, steps.GetArrayLength()).ToArray(),
-                            step_errors = new object?[steps.GetArrayLength()],
-                        } } } },
+                        results = new[] { new { type = "ok", response = new { type = "batch", result } } },
                     });
                     var payload = Encoding.UTF8.GetBytes(responseBody);
                     var response = Encoding.ASCII.GetBytes($"HTTP/1.1 {(fail ? "500 Internal Server Error" : "200 OK")}\r\nContent-Type: application/json\r\nContent-Length: {payload.Length}\r\nConnection: close\r\n\r\n");
@@ -233,6 +282,59 @@ public class TursoPushBatchingTests
                 }
             }
             catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
+        }
+
+        // Hrana conditions execute on the server. Model transaction state and per-statement errors rather
+        // than turning a SQL constraint failure into an HTTP failure (which never exercises COMMIT gating).
+        private object ExecuteBatch(JsonElement steps)
+        {
+            var results = new object?[steps.GetArrayLength()];
+            var errors = new object?[steps.GetArrayLength()];
+            var inTransaction = false;
+            var pendingRows = new List<string>();
+            var pendingWatermark = _watermark;
+            bool Allows(JsonElement condition) => condition.GetProperty("type").GetString() switch
+            {
+                "ok" => results[condition.GetProperty("step").GetInt32()] is not null,
+                "error" => errors[condition.GetProperty("step").GetInt32()] is not null,
+                "not" => !Allows(condition.GetProperty("cond")),
+                "and" => condition.GetProperty("conds").EnumerateArray().All(Allows),
+                "or" => condition.GetProperty("conds").EnumerateArray().Any(Allows),
+                "is_autocommit" => !inTransaction,
+                _ => throw new InvalidOperationException("Unexpected Hrana condition"),
+            };
+            var index = 0;
+            foreach (var step in steps.EnumerateArray())
+            {
+                var current = index++;
+                if (step.TryGetProperty("condition", out var condition) && condition.ValueKind != JsonValueKind.Null && !Allows(condition)) continue;
+                var statement = step.GetProperty("stmt");
+                var sql = statement.GetProperty("sql").GetString()!;
+                var args = statement.GetProperty("args").EnumerateArray().ToArray();
+                var rows = args.Where(a => a.GetProperty("type").GetString() == "text")
+                    .Select(a => a.GetProperty("value").GetString()!)
+                    .Where(v => v.StartsWith("batch-row-", StringComparison.Ordinal)).ToArray();
+                if ((FailStatementRow is not null && rows.Contains(FailStatementRow)) || (FailCommit && sql == "COMMIT"))
+                {
+                    errors[current] = new { message = "SQLite error: FOREIGN KEY constraint failed", code = "SQLITE_CONSTRAINT" };
+                    continue;
+                }
+                if (sql.StartsWith("BEGIN", StringComparison.Ordinal)) inTransaction = true;
+                else if (sql == "ROLLBACK") { inTransaction = false; pendingRows.Clear(); pendingWatermark = _watermark; }
+                else if (sql == "COMMIT")
+                {
+                    inTransaction = false;
+                    _watermark = pendingWatermark;
+                    if (pendingRows.Count > 0) Batches.Add(pendingRows.ToArray());
+                }
+                else if (sql.Contains("INSERT INTO turso_sync_last_change_id", StringComparison.OrdinalIgnoreCase))
+                    pendingWatermark = args.Skip(1).Select(a => a.Clone()).ToArray();
+                else pendingRows.AddRange(rows);
+                object[] values = sql.StartsWith("SELECT", StringComparison.OrdinalIgnoreCase) && _watermark is not null ? [_watermark] : [];
+                results[current] = new { cols = Array.Empty<object>(), rows = values, affected_row_count = 0, last_insert_rowid = (string?)null };
+            }
+            LastBatchLeftTransactionOpen = inTransaction;
+            return new { step_results = results, step_errors = errors };
         }
 
         public async ValueTask DisposeAsync()

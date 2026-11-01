@@ -1,0 +1,140 @@
+diff --git a/sync/engine/src/database_sync_operations.rs b/sync/engine/src/database_sync_operations.rs
+index 8e50bb9..5b640b6 100644
+--- a/sync/engine/src/database_sync_operations.rs
++++ b/sync/engine/src/database_sync_operations.rs
+@@ -2848,7 +2848,14 @@ pub async fn fetch_last_change_id<IO: SyncEngineIo, Ctx>(
+     };
+
+     let no_ignored_steps = std::collections::HashSet::new();
+-    let response = match sql_execute_http(ctx, init_hrana_request, &no_ignored_steps).await {
++    let response = match sql_execute_http(
++        ctx,
++        init_hrana_request,
++        &no_ignored_steps,
++        &BTreeMap::new(),
++    )
++    .await
++    {
+         Ok(response) => response,
+         Err(Error::DatabaseSyncEngineError(err)) if err.contains("no such table") => {
+             return Ok((source_pull_gen, None));
+@@ -3033,12 +3040,11 @@ async fn send_push_batch<IO: SyncEngineIo, Ctx>(
+             want_rows: Some(false),
+             replication_index: None,
+         },
+-        condition: Some(BatchCond::Not {
+-            cond: Box::new(BatchCond::IsAutocommit {}),
+-        }),
++        condition: None,
+     };
+
+     let mut add_column_step_indices = std::collections::HashSet::new();
++    let mut step_contexts = BTreeMap::new();
+     let mut sql_over_http_requests = vec![
+         BatchStep {
+             stmt: Stmt {
+@@ -3193,6 +3199,10 @@ async fn send_push_batch<IO: SyncEngineIo, Ctx>(
+                 }
+             }
+         }
++        step_contexts.insert(
++            sql_over_http_requests.len() - 1,
++            (change_id, change.table_name.as_str()),
++        );
+     }
+
+     if rows_changed > 0 {
+@@ -3216,6 +3226,7 @@ async fn send_push_batch<IO: SyncEngineIo, Ctx>(
+         ));
+     }
+     sql_over_http_requests.push(step("COMMIT".to_string(), Vec::new()));
++    guard_push_batch(&mut sql_over_http_requests, &add_column_step_indices)?;
+
+     tracing::debug!("hrana request: {:?}", sql_over_http_requests);
+     let replay_hrana_request = server_proto::PipelineReqBody {
+@@ -3229,10 +3240,60 @@ async fn send_push_batch<IO: SyncEngineIo, Ctx>(
+         .into(),
+     };
+
+-    let _ = sql_execute_http(ctx, replay_hrana_request, &add_column_step_indices).await?;
++    let _ = sql_execute_http(
++        ctx,
++        replay_hrana_request,
++        &add_column_step_indices,
++        &step_contexts,
++    )
++    .await?;
+     Ok((rows_changed, last_change_id.unwrap_or(0)))
+ }
+
++/// Hrana continues after a statement error unless subsequent steps explicitly depend on success.
++/// Guard the watermark and COMMIT too, then roll back any transaction they could not finish.
++fn guard_push_batch(
++    steps: &mut Vec<BatchStep>,
++    ignored_step_indices: &std::collections::HashSet<usize>,
++) -> Result<()> {
++    assert!(!steps.is_empty(), "a push batch starts with BEGIN");
++    let mut previous_required_step = 0;
++    for (i, step) in steps.iter_mut().enumerate().skip(1) {
++        let previous = u32::try_from(previous_required_step).map_err(|_| {
++            Error::DatabaseSyncEngineError(
++                "push batch exceeds Hrana's step index limit".to_string(),
++            )
++        })?;
++        step.condition = Some(BatchCond::And(server_proto::BatchCondList {
++            conds: vec![
++                BatchCond::Not {
++                    cond: Box::new(BatchCond::IsAutocommit {}),
++                },
++                BatchCond::Ok { step: previous },
++            ],
++        }));
++        // ADD COLUMN errors are already treated as nonfatal for idempotent schema replay. A failed
++        // required step before one must still stop the rest of the batch, including its watermark.
++        if !ignored_step_indices.contains(&i) {
++            previous_required_step = i;
++        }
++    }
++    steps.push(BatchStep {
++        condition: Some(BatchCond::Not {
++            cond: Box::new(BatchCond::IsAutocommit {}),
++        }),
++        stmt: Stmt {
++            sql: Some("ROLLBACK".to_string()),
++            sql_id: None,
++            args: Vec::new(),
++            named_args: Vec::new(),
++            want_rows: Some(false),
++            replication_index: None,
++        },
++    });
++    Ok(())
++}
++
+ pub async fn apply_transformation<IO: SyncEngineIo, Ctx>(
+     ctx: &SyncOperationCtx<'_, IO, Ctx>,
+     changes: &[DatabaseTapeRowChange],
+@@ -3688,6 +3749,7 @@ async fn sql_execute_http<IO: SyncEngineIo, Ctx>(
+     ctx: &SyncOperationCtx<'_, IO, Ctx>,
+     request: server_proto::PipelineReqBody,
+     ignored_step_indices: &std::collections::HashSet<usize>,
++    step_contexts: &BTreeMap<usize, (i64, &str)>,
+ ) -> Result<Vec<StmtResult>> {
+     let body = serde_json::to_vec(&request)?;
+
+@@ -3727,8 +3789,14 @@ async fn sql_execute_http<IO: SyncEngineIo, Ctx>(
+                             if ignored_step_indices.contains(&i) {
+                                 tracing::info!("ignoring step error at index {i}: {error:?}");
+                             } else {
++                                let context = step_contexts.get(&i).map_or_else(
++                                    String::new,
++                                    |(change_id, table)| {
++                                        format!(" (table={table}, change_id={change_id})")
++                                    },
++                                );
+                                 return Err(Error::DatabaseSyncEngineError(format!(
+-                                    "failed to execute sql: {error:?}"
++                                    "failed to execute sql at batch step {i}{context}: {error:?}"
+                                 )));
+                             }
+                         }

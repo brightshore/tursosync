@@ -1,5 +1,14 @@
 # TursoSync
 
+## 1.8.2
+### 🩹 Fixes
+
+- Preserve pending local transaction boundaries during pull and replay, so later sync pushes continue draining offline backlogs in bounded batches while each pull remains atomic.
+- The schema guard no longer breaks opening or pulling a replica that is already open. A second engine on a replica another engine in the process holds failed to open, and every pull in DetectAndBackup mode failed, because the guard copied files the open engine had locked (on macOS and Windows). When the replica is open, the guard now takes its backup as a consistent snapshot through that engine (VACUUM INTO), which is the database file alone, without the sync sidecars; a replica nothing holds is still backed up file by file.
+- Reads on a synced database no longer fail with "database is locked" while a pull is applying changes. The engine failed some of those statements at once instead of waiting out the busy timeout; statements now wait for the apply to finish, and a pull waits only for statements already running. The download before the apply holds nothing, so reads are not held up by a slow network.
+- Roll back a sync upload batch when a required SQL statement fails, preserving its retry position instead of acknowledging partial writes. Push errors identify the failed table and change ID without including row values.
+- TursoSync now runs on Turso engine v0.8.3 (from v0.7.2). Turso 0.8 added two fields to the end of its database configuration struct, and without them every open failed with "unknown database open flags"; TursoSync now sends them, set to no page codec and default open flags. A replica opened by this version is stamped with engine 0.8.3, so treat the upgrade as one-way per replica: TursoSync 1.4.0 and later refuse to open it on an older engine (unless TURSOSYNC_IGNORE_STATE_GUARD=1 is set), but releases before 1.4.0 have no such check and would open it anyway, risking its sync state or a native crash. Don't open an upgraded replica with an older release.
+
 ## 1.8.1
 ### 🩹 Fixes
 
