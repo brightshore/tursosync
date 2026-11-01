@@ -4,6 +4,7 @@
 ### 🩹 Fixes
 
 - Preserve pending local transaction boundaries during pull and replay, so later sync pushes continue draining offline backlogs in bounded batches while each pull remains atomic.
+- Roll back a sync upload batch when a required SQL statement fails, preserving its retry position instead of acknowledging partial writes. Push errors identify the failed table and change ID without including row values.
 
 ## 1.8.1
 ### 🩹 Fixes
