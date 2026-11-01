@@ -111,3 +111,19 @@ The source audit in `prerelease-page-apply-audit.json` compares the relevant
 WAL-apply and page-append functions across 0.8.3, both 0.9.0 prereleases, and the
 recorded upstream main commit. They are byte-identical. This is a source audit,
 not a claim that prerelease binaries were tested.
+
+## Live application observation after 1.9.2
+
+`results/live-1.9.2-results.json` preserves counts from the application logs and
+read-only replica inspection after upgrading to the published release. With a
+lane generating new work, a push starting with 60,567 pending operations finished
+in 44.7 seconds, and all 28 recorded HTTP requests returned 200. The first catch-up
+pull transferred 85.3 MB for a 149.6 MB raw page stream. The next applied pull
+transferred 362 KB in 1.9 seconds and grew the WAL by 2.7 MB. Successful push
+timestamps continued advancing.
+
+This is one live workload, not a controlled before/after benchmark. The WAL delta
+includes rollback, remote application, and local replay. A stable copy of the
+later operation's WAL showed 639 of 646 appended frames changed page contents;
+seven repeated the preceding image. These are page images, not counts of business
+changes. The cloud page-selection mechanism itself was not changed.
