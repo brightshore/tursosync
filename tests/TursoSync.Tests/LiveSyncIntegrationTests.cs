@@ -381,6 +381,78 @@ public class LiveSyncIntegrationTests
         }
     }
 
+    /// <summary>
+    /// The guard snapshots a held replica through the engine that holds it, which belongs to another caller. If that
+    /// owner disposes it mid-snapshot, the native handle must outlive the borrow, not be freed under the running
+    /// statement: the owner's Dispose returns at once, and the handle goes when the snapshot lets go.
+    /// </summary>
+    [TestMethod]
+    public void LiveSync_SchemaGuard_Owner_Disposing_Mid_Snapshot_Frees_Only_After_It()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (x TEXT)", "INSERT INTO t VALUES ('seed')");
+        var dbPath = TempDb();
+        var heldThroughDispose = false;
+        try
+        {
+            var first = TursoSyncDatabase.Create(SyncConfig(dbPath, server));
+            using (var conn = TursoRawConnection.Open(first))
+            {
+                conn.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+            }
+
+            TursoSyncDatabase.SnapshotConnectionOpenedForTest = engine =>
+            {
+                engine.Dispose();
+                heldThroughDispose = engine.HoldsNativeForTest;
+            };
+
+            using var second = TursoSyncDatabase.Create(SyncConfig(dbPath, server) with { BootstrapIfEmpty = false });
+            heldThroughDispose.Should().BeTrue("the owner's Dispose leaves the handle to the borrower");
+            first.HoldsNativeForTest.Should().BeFalse("the handle is freed once the snapshot gives it back");
+            using var other = TursoRawConnection.Open(second);
+            other.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+        }
+        finally
+        {
+            TursoSyncDatabase.SnapshotConnectionOpenedForTest = null;
+            Cleanup(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// An engine opened on a RELATIVE path leaves the live-engine registry when disposed, though the working
+    /// directory moved in between: its registry key is the one computed when it was registered.
+    /// </summary>
+    [TestMethod]
+    public void LiveSync_An_Engine_On_A_Relative_Path_Leaves_The_Registry_After_A_Directory_Change()
+    {
+        using var server = StartServerOrSkip();
+        var dbPath = TempDb();
+        var dir = Path.GetDirectoryName(dbPath)!;
+        var elsewhere = Directory.CreateTempSubdirectory("tursosync-cwd-").FullName;
+        var cwd = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(dir);
+            // As the working directory spells it (on macOS /private/var for /var), which is what the engine resolved.
+            var registered = Path.GetFullPath(Path.GetFileName(dbPath));
+            var db = TursoSyncDatabase.Create(SyncConfig(Path.GetFileName(dbPath), server));
+            TursoSyncDatabase.LiveCountForTest(registered).Should().Be(1);
+
+            Directory.SetCurrentDirectory(elsewhere);
+            db.Dispose();
+
+            TursoSyncDatabase.LiveCountForTest(registered).Should().Be(0, "it was removed under the key it was added with");
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(cwd);
+            Directory.Delete(elsewhere, recursive: true);
+            Cleanup(dbPath);
+        }
+    }
+
     // ---- harness ---------------------------------------------------------------------------------
 
     private static async Task WaitUntil(Func<bool> condition, TimeSpan timeout)

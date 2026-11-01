@@ -11,6 +11,24 @@ public sealed partial class TursoSyncDatabase
 
     private static string LiveKey(string path) => Path.GetFullPath(path);
 
+    // Under Live's lock. The key is the one the engine was registered under, computed once: a relative path
+    // recomputed at Dispose would resolve against whatever the working directory is by then. A borrow is another
+    // caller's snapshot running through this engine (TrySnapshotThroughLiveEngine); while one is out, Dispose leaves
+    // the native handle to the last borrower to free (_releasePending), rather than freeing it under them.
+    private string? _liveKey;
+    private int _borrows;
+    private bool _releasePending;
+
+    /// <summary>Runs inside a borrow, with the snapshot's connection open on the borrowed engine (tests): how a
+    /// test disposes the engine's owner while another caller is using it.</summary>
+    internal static Action<TursoSyncDatabase>? SnapshotConnectionOpenedForTest { get; set; }
+
+    /// <summary>How many live engines the registry holds for <paramref name="path"/> (tests).</summary>
+    internal static int LiveCountForTest(string path) => LiveOn(path).Count;
+
+    /// <summary>Whether this engine still holds its native handle (tests).</summary>
+    internal bool HoldsNativeForTest => _db != IntPtr.Zero;
+
     private static void AddLive(TursoSyncDatabase database, string path)
     {
         lock (Live)
@@ -22,23 +40,64 @@ public sealed partial class TursoSyncDatabase
             }
 
             engines.Add(database);
+            database._liveKey = key;
         }
     }
 
-    private static void RemoveLive(TursoSyncDatabase database)
+    /// <summary>Take this engine out of the registry, so no new borrow can find it. True when the caller is to free
+    /// its native handle now; false when a borrow is out, and the last one returned will.</summary>
+    private bool Retire()
     {
-        if (database._config is not { } config)
-        {
-            return;
-        }
-
         lock (Live)
         {
-            var key = LiveKey(config.Path);
-            if (Live.TryGetValue(key, out var engines) && engines.Remove(database) && engines.Count == 0)
+            if (_liveKey is { } key)
             {
-                Live.Remove(key);
+                if (Live.TryGetValue(key, out var engines) && engines.Remove(this) && engines.Count == 0)
+                {
+                    Live.Remove(key);
+                }
+
+                _liveKey = null;
             }
+
+            if (_borrows > 0)
+            {
+                _releasePending = true;
+                return false;
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>Borrow <paramref name="engine"/> for another caller's snapshot: false once it has been retired.</summary>
+    private static bool TryBorrow(TursoSyncDatabase engine)
+    {
+        lock (Live)
+        {
+            if (engine._liveKey is null)
+            {
+                return false;
+            }
+
+            engine._borrows++;
+            return true;
+        }
+    }
+
+    /// <summary>Give a borrow back, freeing the native handle if the owner disposed the engine meanwhile.</summary>
+    private static void Return(TursoSyncDatabase engine)
+    {
+        bool release;
+        lock (Live)
+        {
+            engine._borrows--;
+            release = engine._borrows == 0 && engine._releasePending;
+        }
+
+        if (release)
+        {
+            engine.ReleaseNative();
         }
     }
 
@@ -138,15 +197,28 @@ public sealed partial class TursoSyncDatabase
         {
             foreach (var engine in LiveOn(path))
             {
+                // Borrowed, so its owner disposing it cannot free its native handle under the snapshot: the handle is
+                // freed when the borrow is returned (Retire).
+                if (!TryBorrow(engine))
+                {
+                    continue;
+                }
+
                 try
                 {
                     using var connection = TursoRawConnection.Open(engine);
+                    SnapshotConnectionOpenedForTest?.Invoke(engine);
                     TursoSchemaGuard.SnapshotInto(connection, target);
                     return true;
                 }
                 catch (ObjectDisposedException)
                 {
-                    // Closed between the lookup and the open: try the next, or copy the files once none is left.
+                    // Disposed by its owner after the lookup: try the next, or copy the files once none is left (by
+                    // then the returned borrow has freed this one's handle and its lock).
+                }
+                finally
+                {
+                    Return(engine);
                 }
             }
 

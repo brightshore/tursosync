@@ -358,7 +358,16 @@ public sealed partial class TursoSyncDatabase : IDisposable
         }
 
         _disposed = true;
-        RemoveLive(this);
+        if (Retire())
+        {
+            ReleaseNative();
+        }
+    }
+
+    /// <summary>Free the native engine and the HTTP client: at Dispose, or when the last borrow of a disposed engine
+    /// is returned (<see cref="Retire"/>).</summary>
+    private void ReleaseNative()
+    {
         if (_db != IntPtr.Zero)
         {
             TursoNative.SyncDatabaseDeinit(_db);
