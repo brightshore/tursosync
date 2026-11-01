@@ -1,0 +1,23 @@
+.github/workflows/integration.yml
+  s_39a534ffa60717::t_15b77ecd96abe0 103,114
+README.md
+  s_39a534ffa60717::t_8fdf92985a6a6a 149-154
+src/TursoSync/CHANGELOG.md
+  s_39a534ffa60717::t_e9aca35459367d 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "5d656c74ad438848778cc12fc2bbd336bf689d97",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
