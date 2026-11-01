@@ -121,6 +121,7 @@ public sealed partial class TursoSyncDatabase : IDisposable
             guard?.VerifyAfter(self, "create");
             // The open succeeded — this engine version now owns the on-disk sync state.
             TursoSyncStateGuard.Stamp(config.Path);
+            AddLive(self, config.Path);
             return self;
         }
         catch
@@ -357,6 +358,7 @@ public sealed partial class TursoSyncDatabase : IDisposable
         }
 
         _disposed = true;
+        RemoveLive(this);
         if (_db != IntPtr.Zero)
         {
             TursoNative.SyncDatabaseDeinit(_db);

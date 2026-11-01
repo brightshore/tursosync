@@ -320,6 +320,67 @@ public class LiveSyncIntegrationTests
         }
     }
 
+    /// <summary>
+    /// A second engine on a replica a live engine in this process already holds. The schema guard backs up an
+    /// existing replica before attaching it, by copying its files, and the live engine holds an exclusive lock
+    /// on the file that .NET's copy (a shared advisory lock on its source) conflicts with on macOS, so the second
+    /// open failed with "being used by another process" in Detect, the default mode.
+    /// </summary>
+    [TestMethod]
+    public void LiveSync_SchemaGuard_Second_Engine_On_A_Held_Replica_Opens()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (x TEXT)", "INSERT INTO t VALUES ('seed')");
+        var dbPath = TempDb();
+        try
+        {
+            using var first = TursoSyncDatabase.Create(SyncConfig(dbPath, server));
+            using (var conn = TursoRawConnection.Open(first))
+            {
+                conn.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+            }
+
+            using var second = TursoSyncDatabase.Create(SyncConfig(dbPath, server) with { BootstrapIfEmpty = false });
+            using var other = TursoRawConnection.Open(second);
+            other.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// A pull in DetectAndBackup mode backs the replica up first, by copying the files this very engine has open:
+    /// the same lock conflict as a second engine's open. The backup must exist and hold the pre-pull tables.
+    /// </summary>
+    [TestMethod]
+    public void LiveSync_SchemaGuard_Pull_With_Backup_Copies_The_Open_Replica()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (x TEXT)", "INSERT INTO t VALUES ('seed')");
+        var dbPath = TempDb();
+        try
+        {
+            using var db = TursoSyncDatabase.Create(SyncConfig(dbPath, server) with { SchemaGuard = TursoSchemaGuardMode.DetectAndBackup });
+            using (var conn = TursoRawConnection.Open(db))
+            {
+                conn.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+            }
+
+            server.ExecRemote("INSERT INTO t VALUES ('pulled')");
+            db.Pull().Should().BeTrue();
+
+            var backups = Directory.GetDirectories(Path.GetDirectoryName(dbPath)!, Path.GetFileName(dbPath) + ".guard-*");
+            backups.Should().NotBeEmpty("DetectAndBackup keeps a copy from before the pull");
+            TursoSchemaGuard.UserTablesOfCopy(Path.Combine(backups[^1], Path.GetFileName(dbPath))).Should().Contain("t");
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
+    }
+
     // ---- harness ---------------------------------------------------------------------------------
 
     private static async Task WaitUntil(Func<bool> condition, TimeSpan timeout)

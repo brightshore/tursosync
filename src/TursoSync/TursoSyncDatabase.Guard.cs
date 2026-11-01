@@ -2,6 +2,54 @@ namespace Turso.Sync;
 
 public sealed partial class TursoSyncDatabase
 {
+    /// <summary>The engines of this process that are open, by the full path of their replica: what the schema guard
+    /// snapshots through when it cannot copy a replica's files (<see cref="GuardScope.BeforeCreate"/>).</summary>
+    private static readonly Dictionary<string, List<TursoSyncDatabase>> Live = new(PathComparer);
+
+    private static StringComparer PathComparer =>
+        OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+
+    private static string LiveKey(string path) => Path.GetFullPath(path);
+
+    private static void AddLive(TursoSyncDatabase database, string path)
+    {
+        lock (Live)
+        {
+            var key = LiveKey(path);
+            if (!Live.TryGetValue(key, out var engines))
+            {
+                Live[key] = engines = [];
+            }
+
+            engines.Add(database);
+        }
+    }
+
+    private static void RemoveLive(TursoSyncDatabase database)
+    {
+        if (database._config is not { } config)
+        {
+            return;
+        }
+
+        lock (Live)
+        {
+            var key = LiveKey(config.Path);
+            if (Live.TryGetValue(key, out var engines) && engines.Remove(database) && engines.Count == 0)
+            {
+                Live.Remove(key);
+            }
+        }
+    }
+
+    private static List<TursoSyncDatabase> LiveOn(string path)
+    {
+        lock (Live)
+        {
+            return Live.TryGetValue(LiveKey(path), out var engines) ? [.. engines] : [];
+        }
+    }
+
     /// <summary>
     /// One schema-guard window around a state-rewriting sync operation: the pre-operation user-table list
     /// (+ optionally a file backup), verified against the post-operation list. See
@@ -40,8 +88,18 @@ public sealed partial class TursoSyncDatabase
             // cross-volume move). Provisional for Detect; already the kept backup for DetectAndBackup.
             var keep = config.SchemaGuard == TursoSchemaGuardMode.DetectAndBackup;
             var copyDir = TursoSchemaGuard.BackupDirFor(config.Path, DateTime.UtcNow) + (keep ? "" : "-pending");
-            TursoSchemaGuard.CopyReplicaFiles(config.Path, copyDir);
-            var before = TursoSchemaGuard.UserTablesOfCopy(Path.Combine(copyDir, Path.GetFileName(config.Path)));
+            var copy = Path.Combine(copyDir, Path.GetFileName(config.Path));
+
+            // A live engine in this process holds the replica, and the files cannot be copied: the engine's exclusive
+            // file lock refuses .NET's copy on macOS (a shared advisory lock) and on Windows (LockFileEx over the
+            // whole file), and a copy of files an engine is writing could be torn wherever it is allowed. So the
+            // pre-image is a snapshot taken through that engine instead.
+            if (!TrySnapshotThroughLiveEngine(config.Path, copy))
+            {
+                TursoSchemaGuard.CopyReplicaFiles(config.Path, copyDir);
+            }
+
+            var before = TursoSchemaGuard.UserTablesOfCopy(copy);
             return new GuardScope(before, config.Path, copyDir, copyIsProvisional: !keep);
         }
 
@@ -57,19 +115,42 @@ public sealed partial class TursoSyncDatabase
             }
 
             List<string> before;
+            string? copyDir = null;
             using (var connection = TursoRawConnection.Open(database))
             {
                 before = TursoSchemaGuard.UserTables(connection);
-            }
 
-            string? copyDir = null;
-            if (config.SchemaGuard == TursoSchemaGuardMode.DetectAndBackup)
-            {
-                copyDir = TursoSchemaGuard.BackupDirFor(config.Path, DateTime.UtcNow);
-                TursoSchemaGuard.CopyReplicaFiles(config.Path, copyDir);
+                // This engine has the replica open, so its files cannot be copied (see BeforeCreate): the backup
+                // is a snapshot taken through it.
+                if (config.SchemaGuard == TursoSchemaGuardMode.DetectAndBackup)
+                {
+                    copyDir = TursoSchemaGuard.BackupDirFor(config.Path, DateTime.UtcNow);
+                    TursoSchemaGuard.SnapshotInto(connection, Path.Combine(copyDir, Path.GetFileName(config.Path)));
+                }
             }
 
             return new GuardScope(before, config.Path, copyDir, copyIsProvisional: false);
+        }
+
+        /// <summary>Snapshot the replica at <paramref name="path"/> into <paramref name="target"/> through a live engine
+        /// of this process that has it open; false when none does, or the one found was disposed meanwhile.</summary>
+        private static bool TrySnapshotThroughLiveEngine(string path, string target)
+        {
+            foreach (var engine in LiveOn(path))
+            {
+                try
+                {
+                    using var connection = TursoRawConnection.Open(engine);
+                    TursoSchemaGuard.SnapshotInto(connection, target);
+                    return true;
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Closed between the lookup and the open: try the next, or copy the files once none is left.
+                }
+            }
+
+            return false;
         }
 
         /// <summary>Compare against the post-operation table list; throw on a drop, clean up otherwise.</summary>
