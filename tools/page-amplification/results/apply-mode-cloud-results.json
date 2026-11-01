@@ -1,0 +1,99 @@
+{
+  "fixture_rows": 256,
+  "payload_bytes_per_row": 4096,
+  "steps": [
+    {
+      "wire_bytes": 4167,
+      "protocol": 1,
+      "stream_kind": 0,
+      "apply_mode": 0,
+      "database_pages": 290,
+      "label": "age_0s",
+      "commits_since_baseline": 1,
+      "elapsed_seconds": 0.223,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 4167,
+      "protocol": 1,
+      "stream_kind": 0,
+      "apply_mode": 0,
+      "database_pages": 290,
+      "label": "commit_1",
+      "commits_since_baseline": 1,
+      "elapsed_seconds": 0.702,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 4169,
+      "protocol": 1,
+      "stream_kind": 0,
+      "apply_mode": 0,
+      "database_pages": 290,
+      "label": "commit_513",
+      "commits_since_baseline": 513,
+      "elapsed_seconds": 18.406,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    }
+  ],
+  "age_checkpoints_seconds": [
+    0
+  ],
+  "commit_checkpoints": [
+    1,
+    513
+  ],
+  "mode": "cloud",
+  "completed": true,
+  "cloud_database": "tursosync-page-probe-eb34721ac4f1",
+  "cloud_database_removed": true,
+  "initial": {
+    "wire_bytes": 1190093,
+    "protocol": 1,
+    "stream_kind": 0,
+    "apply_mode": 0,
+    "database_pages": 290
+  },
+  "sqlite_version": "3.47.0",
+  "journal_mode": "wal",
+  "recent_revision_control": {
+    "wire_bytes": 4169,
+    "protocol": 1,
+    "stream_kind": 0,
+    "apply_mode": 0,
+    "database_pages": 290,
+    "returned_pages": 1,
+    "changed_pages": 1,
+    "unchanged_pages": 0
+  }
+}

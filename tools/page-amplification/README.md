@@ -60,6 +60,9 @@ The checked-in reports preserve the initial controlled experiments:
 * Retaining the same revision for 300 seconds still returned one changed page.
 * After 1,100 additional one-row commits, that older revision returned **32 pages:
   one changed and 31 byte-identical to the baseline**, aligned on a 32-page boundary.
+* Holding one committed change for 35 seconds and then adding two more commits
+  still returned exactly one changed page. Elapsed time plus a few writes alone
+  did not reproduce the transition.
 * Repeated cloud runs switched to 32-page responses after a few hundred commits.
   One run was exact through 481 commits and coarse at 513; another was already
   coarse at 481. This is not evidence of a fixed commit-count threshold.
@@ -77,3 +80,10 @@ about a checkpoint.
 
 The cloud databases in the retained reports were destroyed. No production
 database was written by these experiments.
+
+Turso's [cloud storage architecture description](https://turso.tech/blog/how-does-the-turso-cloud-keep-your-data-durable-and-safe)
+explains that checkpointed database generations consist of 128 KiB segments and
+that checkpoint frequency depends on write volume and pattern. This is consistent
+with the observed 32 × 4 KiB responses. Crossing a server checkpoint/generation
+boundary is the leading explanation, but the probe cannot inspect server
+checkpoint state or its page-selection implementation.

@@ -93,7 +93,9 @@ class Endpoint:
             page_id = page.get(1, 0)
             assert page_id not in pages, 'Duplicate page in response'
             pages[page_id] = payload
-        return header[1], pages, {'wire_bytes': len(wire), 'protocol': header.get(8, 0), 'database_pages': header.get(2, 0)}
+        return header[1], pages, {'wire_bytes': len(wire), 'protocol': header.get(8, 0),
+                                  'stream_kind': header.get(5, 0), 'apply_mode': header.get(6, 0),
+                                  'database_pages': header.get(2, 0)}
 
 def image_state(path, pages, size):
     with path.open('wb') as target:
