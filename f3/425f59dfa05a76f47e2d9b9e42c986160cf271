@@ -1,0 +1,25 @@
+tests/TursoSync.Tests/TursoCdcUpsertTests.cs
+  s_39a534ffa60717::t_e48cb11480e6cb 1-95
+patches/cdc-upsert-before-image.patch
+  s_39a534ffa60717::t_704c90fff3e164 1-403
+README.md
+  s_39a534ffa60717::t_0cf307e3e45788 134-137
+.changeset/eager-pandas-ponder.md
+  s_39a534ffa60717::t_b70c881a430442 1-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "f3425f59dfa05a76f47e2d9b9e42c986160cf271",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
