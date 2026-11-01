@@ -1,0 +1,26 @@
+.gitattributes
+  s_39a534ffa60717::t_e34448e612f101 1-3
+scripts/test-engine-patches.sh
+  s_39a534ffa60717::t_034c0f6adbd43b 1-27,31-35,37-51
+  s_39a534ffa60717::t_c27c80adb083b0 28-30,36
+.github/workflows/ci.yml
+  s_39a534ffa60717::t_034c0f6adbd43b 38-41
+src/TursoSync/CHANGELOG.md
+  s_39a534ffa60717::t_064aa8db08a8f4 7-8,10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "9e17fc4cd72d64a668d1298b882c2253652e2e3c",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
