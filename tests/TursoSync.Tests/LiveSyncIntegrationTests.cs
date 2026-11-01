@@ -320,6 +320,290 @@ public class LiveSyncIntegrationTests
         }
     }
 
+    /// <summary>
+    /// A second engine on a replica a live engine in this process already holds. The schema guard backs up an
+    /// existing replica before attaching it, by copying its files, and the live engine holds an exclusive lock
+    /// on the file that .NET's copy (a shared advisory lock on its source) conflicts with on macOS, so the second
+    /// open failed with "being used by another process" in Detect, the default mode.
+    /// </summary>
+    [TestMethod]
+    public void LiveSync_SchemaGuard_Second_Engine_On_A_Held_Replica_Opens()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (x TEXT)", "INSERT INTO t VALUES ('seed')");
+        var dbPath = TempDb();
+        try
+        {
+            using var first = TursoSyncDatabase.Create(SyncConfig(dbPath, server));
+            using (var conn = TursoRawConnection.Open(first))
+            {
+                conn.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+            }
+
+            using var second = TursoSyncDatabase.Create(SyncConfig(dbPath, server) with { BootstrapIfEmpty = false });
+            using var other = TursoRawConnection.Open(second);
+            other.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// A pull in DetectAndBackup mode backs the replica up first, by copying the files this very engine has open:
+    /// the same lock conflict as a second engine's open. The backup must exist and hold the pre-pull tables.
+    /// </summary>
+    [TestMethod]
+    public void LiveSync_SchemaGuard_Pull_With_Backup_Copies_The_Open_Replica()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (x TEXT)", "INSERT INTO t VALUES ('seed')");
+        var dbPath = TempDb();
+        try
+        {
+            using var db = TursoSyncDatabase.Create(SyncConfig(dbPath, server) with { SchemaGuard = TursoSchemaGuardMode.DetectAndBackup });
+            using (var conn = TursoRawConnection.Open(db))
+            {
+                conn.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+            }
+
+            server.ExecRemote("INSERT INTO t VALUES ('pulled')");
+            db.Pull().Should().BeTrue();
+
+            var backups = Directory.GetDirectories(Path.GetDirectoryName(dbPath)!, Path.GetFileName(dbPath) + ".guard-*");
+            backups.Should().NotBeEmpty("DetectAndBackup keeps a copy from before the pull");
+            TursoSchemaGuard.UserTablesOfCopy(Path.Combine(backups[^1], Path.GetFileName(dbPath))).Should().Contain("t");
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// The guard snapshots a held replica through the engine that holds it, which belongs to another caller. If that
+    /// owner disposes it mid-snapshot, the native handle must outlive the borrow, not be freed under the running
+    /// statement: the owner's Dispose returns at once, and the handle goes when the snapshot lets go.
+    /// </summary>
+    [TestMethod]
+    public void LiveSync_SchemaGuard_Owner_Disposing_Mid_Snapshot_Frees_Only_After_It()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (x TEXT)", "INSERT INTO t VALUES ('seed')");
+        var dbPath = TempDb();
+        var heldThroughDispose = false;
+        try
+        {
+            var first = TursoSyncDatabase.Create(SyncConfig(dbPath, server));
+            using (var conn = TursoRawConnection.Open(first))
+            {
+                conn.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+            }
+
+            TursoSyncDatabase.SnapshotConnectionOpenedForTest = engine =>
+            {
+                engine.Dispose();
+                heldThroughDispose = engine.HoldsNativeForTest;
+            };
+
+            using var second = TursoSyncDatabase.Create(SyncConfig(dbPath, server) with { BootstrapIfEmpty = false });
+            heldThroughDispose.Should().BeTrue("the owner's Dispose leaves the handle to the borrower");
+            first.HoldsNativeForTest.Should().BeFalse("the handle is freed once the snapshot gives it back");
+            using var other = TursoRawConnection.Open(second);
+            other.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+        }
+        finally
+        {
+            TursoSyncDatabase.SnapshotConnectionOpenedForTest = null;
+            Cleanup(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// An engine opened on a RELATIVE path leaves the live-engine registry when disposed, though the working
+    /// directory moved in between: its registry key is the one computed when it was registered.
+    /// </summary>
+    [TestMethod]
+    public void LiveSync_An_Engine_On_A_Relative_Path_Leaves_The_Registry_After_A_Directory_Change()
+    {
+        using var server = StartServerOrSkip();
+        var dbPath = TempDb();
+        var dir = Path.GetDirectoryName(dbPath)!;
+        var elsewhere = Directory.CreateTempSubdirectory("tursosync-cwd-").FullName;
+        var cwd = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(dir);
+            // As the working directory spells it (on macOS /private/var for /var), which is what the engine resolved.
+            var registered = Path.GetFullPath(Path.GetFileName(dbPath));
+            var db = TursoSyncDatabase.Create(SyncConfig(Path.GetFileName(dbPath), server));
+            TursoSyncDatabase.LiveCountForTest(registered).Should().Be(1);
+
+            Directory.SetCurrentDirectory(elsewhere);
+            db.Dispose();
+
+            TursoSyncDatabase.LiveCountForTest(registered).Should().Be(0, "it was removed under the key it was added with");
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(cwd);
+            Directory.Delete(elsewhere, recursive: true);
+            Cleanup(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// Reads on other connections while a pull APPLIES its changes. An application's store saw autocommit reads fail with
+    /// <c>statement_step: database is locked</c> 0-3 ms after they began, every time with a pull applying, and
+    /// never waited out the 5 s busy timeout. A read lost to contention should wait for the lock like any other busy
+    /// step, so none may fail as busy here. Several rounds, each with a local write pending (the apply rolls it back
+    /// and replays it) and a batch of remote rows to apply. The readers' connections are open before each pull, and
+    /// the pull holds its apply back until a read is queued behind it, so every round really reads across an apply
+    /// rather than merely beside one.
+    /// </summary>
+    [TestMethod]
+    public async Task LiveSync_Reads_During_A_Pull_Apply_Wait_Rather_Than_Fail_Busy()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (x TEXT)", "INSERT INTO t VALUES ('seed')");
+
+        var dbPath = TempDb();
+        var connString = $"Data Source={dbPath};Remote Url={server.BaseUrl};Bootstrap=true;Max Idle Connections=8";
+        var busy = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        long reads = 0;
+        long appliesReadAcross = 0;
+        try
+        {
+            TursoSyncDatabase db;
+            using (var first = new TursoConnection(connString))
+            {
+                first.Open();
+                db = first.SyncDatabase!;
+            }
+
+            // Hold each apply until a read is queued behind it: the read was asked for while the apply was under way.
+            db.ApplyStarting = () =>
+            {
+                SpinWait.SpinUntil(() => db.ApplyGate.WaitingReadCount > 0, TimeSpan.FromSeconds(20))
+                    .Should().BeTrue("a reader asks for a read while the apply is held");
+                Interlocked.Increment(ref appliesReadAcross);
+            };
+
+            for (var round = 0; round < 5; round++)
+            {
+                server.ExecRemote(Enumerable.Range(0, 300).Select(_ => "INSERT INTO t VALUES (hex(randomblob(512)))").ToArray());
+                using (var writer = new TursoConnection(connString))
+                {
+                    writer.Open();
+                    using var insert = writer.CreateCommand();
+                    insert.CommandText = $"INSERT INTO t VALUES ('local-{round}')";
+                    insert.ExecuteNonQuery();
+                }
+
+                using var stop = new CancellationTokenSource();
+                using var open = new CountdownEvent(4);
+                var r = round;
+                var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+                {
+                    using var c = new TursoConnection(connString);
+                    c.Open();
+                    open.Signal();
+                    while (!stop.IsCancellationRequested)
+                    {
+                        var watch = Stopwatch.StartNew();
+                        try
+                        {
+                            using var cmd = c.CreateCommand();
+                            cmd.CommandText = "SELECT count(*) FROM t";
+                            cmd.ExecuteScalar();
+                            Interlocked.Increment(ref reads);
+                        }
+                        catch (TursoException ex) when (ex.IsBusy)
+                        {
+                            busy.Enqueue($"round {r}: {ex.Message} after {watch.ElapsedMilliseconds} ms");
+                        }
+                    }
+                })).ToList();
+
+                try
+                {
+                    open.Wait(TimeSpan.FromSeconds(20)).Should().BeTrue("the readers' connections open before the pull");
+                    (await Task.Run(db.Pull)).Should().BeTrue("each round has remote rows to apply");
+                }
+                finally
+                {
+                    stop.Cancel();
+                    await Task.WhenAll(readers);
+                }
+            }
+
+            Interlocked.Read(ref appliesReadAcross).Should().Be(5, "every round read across its apply");
+            busy.Should().BeEmpty("a read contending with a pull's apply waits for the lock rather than failing busy ({0} of {1} reads failed: {2})",
+                busy.Count, Interlocked.Read(ref reads) + busy.Count, string.Join("; ", busy));
+        }
+        finally
+        {
+            TursoConnection.ClearPool();
+            Cleanup(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// A user function that calls a sync operation while another thread pulls. Were the apply gate held across the
+    /// callback, the two would deadlock: the callback waits for the operation lock the pull holds, and the pull waits
+    /// for the callback's read lock to apply. The callback runs holding no gate, so both finish.
+    /// </summary>
+    [TestMethod]
+    public async Task LiveSync_A_User_Function_Calling_Sync_During_A_Pull_Does_Not_Deadlock()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (x TEXT)", "INSERT INTO t VALUES ('seed')");
+        var dbPath = TempDb();
+        try
+        {
+            // Not `using`: on a deadlock, disposing them would block on the deadlocked engine and hang the run.
+            var db = TursoSyncDatabase.Create(SyncConfig(dbPath, server));
+            var conn = TursoRawConnection.Open(db);
+            using var entered = new ManualResetEventSlim();
+            using var applyStarted = new ManualResetEventSlim();
+            db.ApplyStarting = applyStarted.Set;
+            conn.RegisterScalarFunction("stats_mid_pull", 0, deterministic: false, _ =>
+            {
+                entered.Set();
+                // Until the pull is applying, or (gate held across callbacks) waiting on this thread to apply.
+                SpinWait.SpinUntil(() => applyStarted.IsSet || db.ApplyGate.WaitingWriteCount > 0, TimeSpan.FromSeconds(20));
+                db.Stats();
+                return 1L;
+            });
+
+            server.ExecRemote("INSERT INTO t VALUES ('pulled')");
+            var query = Task.Run(() => conn.QueryScalar("SELECT stats_mid_pull()"));
+            entered.Wait(TimeSpan.FromSeconds(20)).Should().BeTrue("the function is running");
+            var pull = Task.Run(db.Pull);
+
+            try
+            {
+                await Task.WhenAll(query, pull).WaitAsync(TimeSpan.FromSeconds(30));
+            }
+            catch (TimeoutException)
+            {
+                Assert.Fail("the function and the pull deadlocked: the function waits for the operation lock the pull " +
+                            "holds, and the pull waits for the function's read lock to apply");
+            }
+
+            query.Result.Should().Be(1L);
+            pull.Result.Should().BeTrue();
+            conn.QueryScalar("SELECT count(*) FROM t").Should().Be(2L);
+            conn.Dispose();
+            db.Dispose();
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
+    }
+
     // ---- harness ---------------------------------------------------------------------------------
 
     private static async Task WaitUntil(Func<bool> condition, TimeSpan timeout)
