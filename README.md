@@ -146,6 +146,12 @@ finish uploading. This normalization applies to the standard push path without a
 transform. It never combines changes across source transactions, and the acknowledgment uses
 the original insert's CDC change ID. Foreign-key checks remain enabled.
 
+Incremental pulls compare incoming pages with the restored remote database image before
+replaying local changes. Byte-identical pages are skipped when appending to the WAL, apart
+from the final frame needed to record the commit and database size. Replace-base snapshots
+and partial replicas retain their existing apply path. This reduces local WAL growth when
+the cloud returns whole storage segments; it does not reduce which pages the server sends.
+
 ## Full-text search
 
 Tantivy FTS is behind the engine's experimental `index_method` feature, so opt in with

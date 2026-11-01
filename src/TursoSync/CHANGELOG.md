@@ -4,6 +4,7 @@
 ### 🩹 Fixes
 
 - Preserve parent references during sync replay and queued uploads; reduce response traffic with gzip and correct native configuration layout.
+- Skip byte-identical pages during incremental pull apply to reduce WAL growth when the cloud returns whole storage segments.
 
 ## 1.9.1
 ### 🩹 Fixes

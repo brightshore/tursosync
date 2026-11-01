@@ -100,7 +100,7 @@ jobs:
       # (the release ships only the turso_cli/tursodb binaries; the official Turso.Data.Sqlite NuGet ships the
       # *base* turso_sdk_kit, which lacks the sync engine + FTS). tursodb, by contrast, IS a published release
       # artifact, so we download it instead of a second cargo build.
-      - name: Build Turso sync native (Release, FTS)
+      - name: Build and test Turso sync native (Release, FTS)
         if: steps.turso-bin.outputs.cache-hit != 'true'
         shell: bash
         env:
@@ -110,7 +110,11 @@ jobs:
           # (--cfg=tokio_unstable, which the sync engine needs); this per-triple variable is joined with them.
           CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
         run: |
-          cargo build --manifest-path turso/Cargo.toml -p turso_sync_sdk_kit --features turso_sdk_kit/fts --release
+          (
+            cd turso
+            cargo build -p turso_sync_sdk_kit --features turso_sdk_kit/fts --release
+            cargo test -p turso_sync_engine -p turso_sync_sdk_kit --features turso_sdk_kit/fts --release --lib unchanged_pulled_pages_do_not_refill_wal -- --nocapture
+          )
           mkdir -p turso-bin
           # cdylib name varies by OS (lib*.so / lib*.dylib / *.dll); copy whichever exists.
           # nullglob so a pattern matching nothing disappears rather than being passed through

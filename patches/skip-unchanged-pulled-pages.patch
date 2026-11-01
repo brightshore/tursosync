@@ -1,0 +1,295 @@
+diff --git a/sync/engine/src/database_tape.rs b/sync/engine/src/database_tape.rs
+--- a/sync/engine/src/database_tape.rs
++++ b/sync/engine/src/database_tape.rs
+@@ -333,6 +333,36 @@
+         self.prepared_frame = Some((page_no, frame));
+ 
+         Ok(())
++    }
++
++    pub(crate) async fn page_matches<Ctx>(
++        &self,
++        coro: &Coro<Ctx>,
++        page_no: u32,
++        page: &[u8],
++        current: &mut [u8],
++    ) -> Result<bool> {
++        if page.len() != self.page_size {
++            return Err(Error::DatabaseTapeError(format!(
++                "page.len() must be equal to page_size: {} != {}",
++                page.len(),
++                self.page_size
++            )));
++        }
++        if let Some((prepared_page_no, frame)) = &self.prepared_frame {
++            if *prepared_page_no == page_no {
++                return Ok(&frame[WAL_FRAME_HEADER..] == page);
++            }
++        }
++        let exists = try_wal_watermark_read_page(
++            coro,
++            self.wal_session.conn(),
++            page_no,
++            current,
++            Some(self.next_wal_frame_no - 1),
++        )
++        .await?;
++        Ok(exists && current == page)
+     }
+ 
+     pub async fn rollback_page<Ctx>(
+diff --git a/sync/engine/src/database_sync_engine.rs b/sync/engine/src/database_sync_engine.rs
+--- a/sync/engine/src/database_sync_engine.rs
++++ b/sync/engine/src/database_sync_engine.rs
+@@ -2456,6 +2456,7 @@
+                         main_session
+                             .as_mut()
+                             .expect("main WAL session must be active"),
++                        !replace_base_pages && self.meta().partial_sync_opts().is_none(),
+                     )
+                     .await?;
+                     tracing::info!(
+diff --git a/sync/engine/src/database_sync_operations.rs b/sync/engine/src/database_sync_operations.rs
+--- a/sync/engine/src/database_sync_operations.rs
++++ b/sync/engine/src/database_sync_operations.rs
+@@ -1814,6 +1814,7 @@
+     coro: &Coro<Ctx>,
+     frames_file: &Arc<dyn turso_core::File>,
+     session: &mut DatabaseWalSession,
++    skip_unchanged: bool,
+ ) -> Result<u32> {
+     let size = frames_file.size()?;
+     assert!(size % WAL_FRAME_SIZE as u64 == 0);
+@@ -1821,6 +1822,8 @@
+     let buffer = Arc::new(Buffer::new_temporary(WAL_FRAME_SIZE));
+     tracing::info!("wal_apply_from_file: size={}", size);
+     let mut db_size = 0;
++    let mut current = [0; PAGE_SIZE];
++    let mut skipped = 0;
+     for offset in (0..size).step_by(WAL_FRAME_SIZE) {
+         let c = Completion::new_read(buffer.clone(), move |result| {
+             let Ok((_, size)) = result else {
+@@ -1837,9 +1840,24 @@
+         let info = WalFrameInfo::from_frame_header(buffer.as_slice());
+         tracing::debug!("got frame: {:?}", info);
+         db_size = info.db_size;
+-        session.append_page(info.page_no, &buffer.as_slice()[WAL_FRAME_HEADER..])?;
++        let page = &buffer.as_slice()[WAL_FRAME_HEADER..];
++        if skip_unchanged
++            && offset + (WAL_FRAME_SIZE as u64) < size
++            && session
++                .page_matches(coro, info.page_no, page, &mut current)
++                .await?
++        {
++            skipped += 1;
++        } else {
++            session.append_page(info.page_no, page)?;
++        }
+     }
+     assert!(db_size > 0);
++    tracing::info!(
++        "wal_apply_from_file: pages={} skipped_unchanged={}",
++        size / WAL_FRAME_SIZE as u64,
++        skipped
++    );
+     Ok(db_size)
+ }
+ 
+@@ -4273,6 +4291,197 @@
+     }
+ 
+     #[test]
++    fn unchanged_pulled_pages_do_not_refill_wal() {
++        use crate::{
++            database_tape::{run_stmt_ignore_rows, DatabaseWalSession},
++            wal_session::WalSession,
++        };
++        use turso_core::{Database, IO};
++
++        for (remote_changed, local_changed, skip_unchanged, page_size) in [
++            (false, false, true, 8192),
++            (false, false, true, 4096),
++            (true, false, true, 4096),
++            (false, true, true, 4096),
++            (true, true, true, 4096),
++            (false, false, false, 4096),
++            (true, true, false, 4096),
++        ] {
++            let directory = tempfile::tempdir().expect("test directory");
++            let source_path = directory.path().join("source.db");
++            let replica_path = directory.path().join("replica.db");
++            let frames_path = directory.path().join("frames");
++            let io: Arc<dyn IO> = Arc::new(turso_core::PlatformIO::new().expect("platform IO"));
++            let source = Database::open_file(
++                io.clone(),
++                source_path.to_str().expect("source path"),
++                Arc::new(SqliteDialect),
++            )
++            .expect("source database");
++            let mut generator = genawaiter::sync::Gen::new({
++                let io = io.clone();
++                move |coro| async move {
++                    let coro: Coro<()> = coro.into();
++                    let conn = source.connect().expect("source connection");
++                    conn.execute(format!("PRAGMA page_size={page_size}"))
++                        .expect("fixture page size");
++                    for sql in [
++                        "CREATE TABLE probe(id INTEGER PRIMARY KEY, marker INTEGER, payload BLOB)",
++                        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<64) INSERT INTO probe SELECT x,100,zeroblob(4096) FROM n",
++                        "PRAGMA wal_checkpoint(TRUNCATE)",
++                    ] {
++                        run_stmt_ignore_rows(&coro, &mut conn.prepare(sql).expect("fixture SQL")).await.expect("fixture execution");
++                    }
++                    let baseline = std::fs::read(&source_path).expect("baseline image");
++                    assert!(baseline.len() >= 32 * super::PAGE_SIZE);
++                    std::fs::write(&replica_path, &baseline).expect("replica image");
++                    if remote_changed {
++                        for sql in [
++                            "UPDATE probe SET marker=101 WHERE id=32",
++                            "PRAGMA wal_checkpoint(TRUNCATE)",
++                        ] {
++                            run_stmt_ignore_rows(
++                                &coro,
++                                &mut conn.prepare(sql).expect("remote SQL"),
++                            )
++                            .await
++                            .expect("remote execution");
++                        }
++                    }
++                    let remote = std::fs::read(&source_path).expect("remote image");
++                    let database_pages = remote.len() / super::PAGE_SIZE;
++                    let changed_pages = remote
++                        .chunks_exact(super::PAGE_SIZE)
++                        .enumerate()
++                        .filter(|(index, page)| {
++                            baseline.get(index * super::PAGE_SIZE..(index + 1) * super::PAGE_SIZE)
++                                != Some(*page)
++                        })
++                        .count();
++                    let mut frames = Vec::new();
++                    for (index, page) in remote.chunks_exact(super::PAGE_SIZE).enumerate() {
++                        let mut frame = vec![0; super::WAL_FRAME_SIZE];
++                        turso_core::types::WalFrameInfo {
++                            page_no: index as u32 + 1,
++                            db_size: if index + 1 == database_pages {
++                                database_pages as u32
++                            } else {
++                                0
++                            },
++                        }
++                        .put_to_frame_header(&mut frame);
++                        frame[super::WAL_FRAME_HEADER..].copy_from_slice(page);
++                        frames.extend_from_slice(&frame);
++                    }
++                    std::fs::write(&frames_path, frames).expect("incoming frames");
++                    let frames_file = io
++                        .open_file(
++                            frames_path.to_str().expect("frames path"),
++                            turso_core::OpenFlags::Create,
++                            false,
++                        )
++                        .expect("frames file");
++                    let replica = Database::open_file(
++                        io.clone(),
++                        replica_path.to_str().expect("replica path"),
++                        Arc::new(SqliteDialect),
++                    )
++                    .expect("replica database");
++                    let replica_conn = replica.connect().expect("replica connection");
++                    let watermark = replica_conn
++                        .wal_state()
++                        .expect("initial WAL state")
++                        .max_frame;
++                    if local_changed {
++                        run_stmt_ignore_rows(
++                            &coro,
++                            &mut replica_conn
++                                .prepare("UPDATE probe SET marker=101 WHERE id=32")
++                                .expect("local update"),
++                        )
++                        .await
++                        .expect("local execution");
++                    }
++                    let mut raw = WalSession::new(replica_conn);
++                    raw.begin().expect("begin WAL session");
++                    let mut session = DatabaseWalSession::new(&coro, raw)
++                        .await
++                        .expect("WAL session");
++                    let rolled_back = session
++                        .rollback_changes_after(&coro, watermark)
++                        .await
++                        .expect("rollback local changes");
++                    let before = session.frames_count().expect("before frames");
++                    let applied = super::wal_apply_from_file(
++                        &coro,
++                        &frames_file,
++                        &mut session,
++                        skip_unchanged,
++                    )
++                    .await;
++                    if page_size != super::PAGE_SIZE {
++                        let error = applied.expect_err("incompatible page sizes must be rejected");
++                        assert!(error
++                            .to_string()
++                            .contains("page.len() must be equal to page_size"));
++                        assert_eq!(session.frames_count().expect("unchanged WAL"), before);
++                        session.wal_session.end(false).expect("end rejected apply");
++                        return;
++                    }
++                    let size = applied.expect("apply remote frames");
++                    assert_eq!(size, database_pages as u32);
++                    session.commit(size).expect("commit remote pages");
++                    let written = session.frames_count().expect("after frames") - before;
++                    if skip_unchanged {
++                        assert!(written <= (changed_pages + rolled_back + 1) as u64, "returned {database_pages} pages, changed {changed_pages}, rolled back {rolled_back}, wrote {written}");
++                    } else {
++                        assert!(written >= database_pages as u64);
++                    }
++                    eprintln!("skip={skip_unchanged} remote_changed={remote_changed} local_changed={local_changed}: returned={database_pages} changed={changed_pages} rollback={rolled_back} written={written}");
++                    session.wal_session.end(false).expect("end WAL session");
++                    let reader = replica.connect().expect("reader");
++                    let integrity = run_stmt_expect_one_row(
++                        &coro,
++                        &mut reader
++                            .prepare("PRAGMA integrity_check")
++                            .expect("integrity statement"),
++                    )
++                    .await
++                    .expect("integrity query")
++                    .expect("integrity result");
++                    assert_eq!(
++                        integrity,
++                        vec![turso_core::Value::Text(turso_core::types::Text::new("ok"))]
++                    );
++                    let row = run_stmt_expect_one_row(
++                        &coro,
++                        &mut reader
++                            .prepare("SELECT marker FROM probe WHERE id=32")
++                            .expect("read marker"),
++                    )
++                    .await
++                    .expect("marker query")
++                    .expect("marker row");
++                    assert_eq!(
++                        row,
++                        vec![turso_core::Value::from_i64(if remote_changed {
++                            101
++                        } else {
++                            100
++                        })]
++                    );
++                }
++            });
++            loop {
++                match generator.resume_with(Ok(())) {
++                    genawaiter::GeneratorState::Yielded(_) => io.step().expect("drive IO"),
++                    genawaiter::GeneratorState::Complete(()) => break,
++                }
++            }
++        }
++    }
++
++    #[test]
+     pub fn wait_proto_message_test() {
+         let mut data = Vec::new();
+         for i in 0..1024 {

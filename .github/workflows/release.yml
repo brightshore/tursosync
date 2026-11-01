@@ -82,6 +82,7 @@ jobs:
           key: ${{ steps.pin.outputs.sha }}-${{ matrix.rid }}-${{ hashFiles('patches/*.patch') }}
 
       - name: Build native (Release, FTS, stripped)
+        working-directory: turso
         shell: bash
         # strip=true uses Rust's export-safe strip (keeps the #[no_mangle] turso_sync_* exports) — cuts the
         # native size dramatically (esp. Linux debuginfo) so the package stays under nuget.org's 250 MB cap.
@@ -91,7 +92,7 @@ jobs:
           # `cfg(target_env = "msvc")` rustflags (--cfg=tokio_unstable) instead of joining them. Same as Integration.
           CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
           CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --manifest-path turso/Cargo.toml -p turso_sync_sdk_kit --features turso_sdk_kit/fts --release --target ${{ matrix.target }} --config profile.release.strip=true
+        run: cargo build -p turso_sync_sdk_kit --features turso_sdk_kit/fts --release --target ${{ matrix.target }} --config profile.release.strip=true
 
       - name: Stage native
         shell: bash
