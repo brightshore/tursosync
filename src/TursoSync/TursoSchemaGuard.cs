@@ -23,7 +23,9 @@ public enum TursoSchemaGuardMode
     /// <summary>
     /// Detect, and always keep a timestamped backup of the replica files taken before the operation,
     /// whether or not anything was dropped. The backup directory is <c>&lt;path&gt;.guard-&lt;utc-stamp&gt;</c>
-    /// beside the database.
+    /// beside the database. When an engine of this process has the replica open (always, around a pull), its
+    /// files cannot be copied, and the backup is instead a consistent snapshot of the database taken through that
+    /// engine (<c>VACUUM INTO</c>): the main file alone, without the sync sidecars.
     /// </summary>
     DetectAndBackup,
 }
@@ -52,7 +54,8 @@ public sealed class TursoSchemaGuardException : Exception
     /// <summary>The user tables that existed before the operation and are gone after it.</summary>
     public IReadOnlyList<string> DroppedTables { get; }
 
-    /// <summary>Directory holding a pre-operation copy of the replica files, or null when none was taken
+    /// <summary>Directory holding a pre-operation copy of the replica files, or a snapshot of the database when the
+    /// replica was open (see <see cref="TursoSchemaGuardMode.DetectAndBackup"/>); null when none was taken
     /// (<see cref="TursoSchemaGuardMode.Detect"/> around a pull).</summary>
     public string? BackupDirectory { get; }
 
@@ -60,7 +63,7 @@ public sealed class TursoSchemaGuardException : Exception
         $"Sync {operation} dropped local table(s): {string.Join(", ", dropped)}." +
         (backupDir is null
             ? " No pre-operation backup was taken (SchemaGuard=Detect around a pull)."
-            : $" A pre-operation copy of the replica files was kept at '{backupDir}'.") +
+            : $" A pre-operation backup of the replica was kept at '{backupDir}'.") +
         " If these tables were created before the remote was attached, ReconcileLocalTables() teaches the" +
         " server their schema and rows so the drop does not recur.";
 }
@@ -117,6 +120,17 @@ internal static class TursoSchemaGuard
                 File.Copy(source, Path.Combine(targetDir, Path.GetFileName(source)), overwrite: true);
             }
         }
+    }
+
+    /// <summary>
+    /// Write a consistent snapshot of the database <paramref name="connection"/> is open on to
+    /// <paramref name="target"/> (<c>VACUUM INTO</c>), creating its directory. For a replica an engine holds,
+    /// whose files cannot be copied (<see cref="CopyReplicaFiles"/>).
+    /// </summary>
+    internal static void SnapshotInto(TursoRawConnection connection, string target)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+        connection.Execute("VACUUM INTO '" + target.Replace("'", "''", StringComparison.Ordinal) + "'");
     }
 
     /// <summary>The kept-backup directory name for <paramref name="mainPath"/> at <paramref name="utcNow"/>.</summary>

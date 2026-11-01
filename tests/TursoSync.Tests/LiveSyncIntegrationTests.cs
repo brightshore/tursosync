@@ -321,6 +321,139 @@ public class LiveSyncIntegrationTests
     }
 
     /// <summary>
+    /// A second engine on a replica a live engine in this process already holds. The schema guard backs up an
+    /// existing replica before attaching it, by copying its files, and the live engine holds an exclusive lock
+    /// on the file that .NET's copy (a shared advisory lock on its source) conflicts with on macOS, so the second
+    /// open failed with "being used by another process" in Detect, the default mode.
+    /// </summary>
+    [TestMethod]
+    public void LiveSync_SchemaGuard_Second_Engine_On_A_Held_Replica_Opens()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (x TEXT)", "INSERT INTO t VALUES ('seed')");
+        var dbPath = TempDb();
+        try
+        {
+            using var first = TursoSyncDatabase.Create(SyncConfig(dbPath, server));
+            using (var conn = TursoRawConnection.Open(first))
+            {
+                conn.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+            }
+
+            using var second = TursoSyncDatabase.Create(SyncConfig(dbPath, server) with { BootstrapIfEmpty = false });
+            using var other = TursoRawConnection.Open(second);
+            other.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// A pull in DetectAndBackup mode backs the replica up first, by copying the files this very engine has open:
+    /// the same lock conflict as a second engine's open. The backup must exist and hold the pre-pull tables.
+    /// </summary>
+    [TestMethod]
+    public void LiveSync_SchemaGuard_Pull_With_Backup_Copies_The_Open_Replica()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (x TEXT)", "INSERT INTO t VALUES ('seed')");
+        var dbPath = TempDb();
+        try
+        {
+            using var db = TursoSyncDatabase.Create(SyncConfig(dbPath, server) with { SchemaGuard = TursoSchemaGuardMode.DetectAndBackup });
+            using (var conn = TursoRawConnection.Open(db))
+            {
+                conn.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+            }
+
+            server.ExecRemote("INSERT INTO t VALUES ('pulled')");
+            db.Pull().Should().BeTrue();
+
+            var backups = Directory.GetDirectories(Path.GetDirectoryName(dbPath)!, Path.GetFileName(dbPath) + ".guard-*");
+            backups.Should().NotBeEmpty("DetectAndBackup keeps a copy from before the pull");
+            TursoSchemaGuard.UserTablesOfCopy(Path.Combine(backups[^1], Path.GetFileName(dbPath))).Should().Contain("t");
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// The guard snapshots a held replica through the engine that holds it, which belongs to another caller. If that
+    /// owner disposes it mid-snapshot, the native handle must outlive the borrow, not be freed under the running
+    /// statement: the owner's Dispose returns at once, and the handle goes when the snapshot lets go.
+    /// </summary>
+    [TestMethod]
+    public void LiveSync_SchemaGuard_Owner_Disposing_Mid_Snapshot_Frees_Only_After_It()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (x TEXT)", "INSERT INTO t VALUES ('seed')");
+        var dbPath = TempDb();
+        var heldThroughDispose = false;
+        try
+        {
+            var first = TursoSyncDatabase.Create(SyncConfig(dbPath, server));
+            using (var conn = TursoRawConnection.Open(first))
+            {
+                conn.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+            }
+
+            TursoSyncDatabase.SnapshotConnectionOpenedForTest = engine =>
+            {
+                engine.Dispose();
+                heldThroughDispose = engine.HoldsNativeForTest;
+            };
+
+            using var second = TursoSyncDatabase.Create(SyncConfig(dbPath, server) with { BootstrapIfEmpty = false });
+            heldThroughDispose.Should().BeTrue("the owner's Dispose leaves the handle to the borrower");
+            first.HoldsNativeForTest.Should().BeFalse("the handle is freed once the snapshot gives it back");
+            using var other = TursoRawConnection.Open(second);
+            other.QueryScalar("SELECT count(*) FROM t").Should().Be(1L);
+        }
+        finally
+        {
+            TursoSyncDatabase.SnapshotConnectionOpenedForTest = null;
+            Cleanup(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// An engine opened on a RELATIVE path leaves the live-engine registry when disposed, though the working
+    /// directory moved in between: its registry key is the one computed when it was registered.
+    /// </summary>
+    [TestMethod]
+    public void LiveSync_An_Engine_On_A_Relative_Path_Leaves_The_Registry_After_A_Directory_Change()
+    {
+        using var server = StartServerOrSkip();
+        var dbPath = TempDb();
+        var dir = Path.GetDirectoryName(dbPath)!;
+        var elsewhere = Directory.CreateTempSubdirectory("tursosync-cwd-").FullName;
+        var cwd = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(dir);
+            // As the working directory spells it (on macOS /private/var for /var), which is what the engine resolved.
+            var registered = Path.GetFullPath(Path.GetFileName(dbPath));
+            var db = TursoSyncDatabase.Create(SyncConfig(Path.GetFileName(dbPath), server));
+            TursoSyncDatabase.LiveCountForTest(registered).Should().Be(1);
+
+            Directory.SetCurrentDirectory(elsewhere);
+            db.Dispose();
+
+            TursoSyncDatabase.LiveCountForTest(registered).Should().Be(0, "it was removed under the key it was added with");
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(cwd);
+            Directory.Delete(elsewhere, recursive: true);
+            Cleanup(dbPath);
+        }
+    }
+
+    /// <summary>
     /// Reads on other connections while a pull APPLIES its changes. An application's store saw autocommit reads fail with
     /// <c>statement_step: database is locked</c> 0-3 ms after they began, every time with a pull applying, and
     /// never waited out the 5 s busy timeout. A read lost to contention should wait for the lock like any other busy
