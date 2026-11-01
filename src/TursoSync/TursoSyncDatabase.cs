@@ -20,8 +20,8 @@ public sealed partial class TursoSyncDatabase : IDisposable
     internal object Gate => _gate;
 
     /// <summary>
-    /// Held exclusively while <see cref="Pull"/> applies its changes, and shared by every prepare and statement step
-    /// on this database's connections, for that one native call.
+    /// Held exclusively while <see cref="Pull"/> applies its changes, and shared by every prepare, statement step and
+    /// statement IO continuation on this database's connections, for that one native call.
     ///
     /// <para>The engine waits out a busy step only when the step itself answers busy; a busy raised as an ERROR
     /// inside the step skips its busy handler (<c>Statement::step</c> in core/statement.rs invokes it on
@@ -32,13 +32,17 @@ public sealed partial class TursoSyncDatabase : IDisposable
     /// progress, and an apply waits only for the calls already under way. The download before the apply, which can
     /// take seconds on a slow network, holds nothing here.</para>
     ///
-    /// <para>Recursive, because a user function or the schema guard can step a statement on a thread that already
-    /// holds it.</para>
+    /// <para>Recursive, because the schema guard can step a statement on a thread that already holds it. A user
+    /// function, aggregate or collation runs holding none of it (<see cref="ApplyGateHolds"/>).</para>
     /// </summary>
     private readonly ReaderWriterLockSlim _applyGate = new(LockRecursionPolicy.SupportsRecursion);
 
     /// <summary>See <see cref="_applyGate"/>.</summary>
     internal ReaderWriterLockSlim ApplyGate => _applyGate;
+
+    /// <summary>Runs holding the apply gate exclusively, just before a pull applies its changes. A test seam: holding
+    /// it open is how a test makes a statement start while the apply is under way.</summary>
+    internal Action? ApplyStarting { get; set; }
     /// <summary>
     /// Optional callback for one safe diagnostic per completed HTTP request (including failed requests).
     /// Null by default. Runs synchronously under the database's operation lock; keep it fast and do not
@@ -296,6 +300,7 @@ public sealed partial class TursoSyncDatabase : IDisposable
             _applyGate.EnterWriteLock();
             try
             {
+                ApplyStarting?.Invoke();
                 var status2 = TursoNative.SyncDatabaseApplyChanges(_db, changes, out var applyOp, out var errorPtr);
                 Check(status2, errorPtr, "apply_changes");
                 DriveAndDeinit(applyOp, "apply_changes");

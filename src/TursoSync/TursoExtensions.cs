@@ -110,7 +110,14 @@ internal static class TursoExtensionMarshal
         {
             var registration = (ScalarFunctionRegistration?)GCHandle.FromIntPtr(context).Target
                 ?? throw new ObjectDisposedException(nameof(ScalarFunctionRegistration));
-            return CreateResult(registration.Invoke(ReadArguments(argc, argv)));
+            var args = ReadArguments(argc, argv);
+            object? result;
+            using (ApplyGateHolds.Suspend())
+            {
+                result = registration.Invoke(args);
+            }
+
+            return CreateResult(result);
         }
         catch (Exception ex)
         {
@@ -131,7 +138,12 @@ internal static class TursoExtensionMarshal
         {
             var invocation = (AggregateInvocation?)GCHandle.FromIntPtr(aggregateContext).Target
                 ?? throw new ObjectDisposedException(nameof(AggregateInvocation));
-            invocation.Step(ReadArguments(argc, argv));
+            var args = ReadArguments(argc, argv);
+            using (ApplyGateHolds.Suspend())
+            {
+                invocation.Step(args);
+            }
+
             return CreateResult(null);
         }
         catch (Exception ex)
@@ -146,7 +158,13 @@ internal static class TursoExtensionMarshal
         {
             var invocation = (AggregateInvocation?)GCHandle.FromIntPtr(aggregateContext).Target
                 ?? throw new ObjectDisposedException(nameof(AggregateInvocation));
-            return CreateResult(invocation.FinalizeResult());
+            object? result;
+            using (ApplyGateHolds.Suspend())
+            {
+                result = invocation.FinalizeResult();
+            }
+
+            return CreateResult(result);
         }
         catch (Exception ex)
         {
@@ -176,7 +194,12 @@ internal static class TursoExtensionMarshal
     {
         var registration = (CollationRegistration?)GCHandle.FromIntPtr(context).Target
             ?? throw new ObjectDisposedException(nameof(CollationRegistration));
-        return registration.Compare(ReadUtf8(leftPtr, checked((int)leftLen)), ReadUtf8(rightPtr, checked((int)rightLen)));
+        var left = ReadUtf8(leftPtr, checked((int)leftLen));
+        var right = ReadUtf8(rightPtr, checked((int)rightLen));
+        using (ApplyGateHolds.Suspend())
+        {
+            return registration.Compare(left, right);
+        }
     }
 
     private static void DestroyValue(IntPtr result)
