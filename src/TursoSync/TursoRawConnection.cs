@@ -165,9 +165,21 @@ public sealed class TursoRawConnection : IDisposable
 
     private TursoRawStatement PrepareOnce(string sql)
     {
-        var status = TursoNative.ConnectionPrepareSingle(_connection, sql, out var stmt, out var errorPtr);
+        var gate = _syncDatabase?.ApplyGate;
+        ApplyGateHolds.Enter(gate);
+        TursoStatus status;
+        IntPtr stmt, errorPtr;
+        try
+        {
+            status = TursoNative.ConnectionPrepareSingle(_connection, sql, out stmt, out errorPtr);
+        }
+        finally
+        {
+            ApplyGateHolds.Exit(gate);
+        }
+
         TursoSyncDatabase.Check(status, errorPtr, "prepare_single");
-        return new TursoRawStatement(stmt, _pump);
+        return new TursoRawStatement(stmt, _pump, gate);
     }
 
     /// <summary>Execute non-query SQL and return rows affected.</summary>
@@ -308,17 +320,126 @@ public sealed class TursoRawConnection : IDisposable
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
 }
 
+/// <summary>
+/// The apply gates (<see cref="TursoSyncDatabase.ApplyGate"/>) this thread holds for a native prepare or step in
+/// progress, so that a user function, aggregate or collation the engine runs inside that call can let them go.
+///
+/// <para>Held across a callback, a gate could deadlock: the callback calls anything that takes the database's
+/// operation lock (opening a connection, <c>Push</c>, <c>Stats</c>, <c>Pull</c>) while another thread's
+/// <c>Pull</c> holds that lock and waits for this thread's read lock to apply. And a callback calling <c>Pull</c>
+/// itself would ask for the write lock while holding a read lock, which <see cref="ReaderWriterLockSlim"/> refuses.
+/// So user code always runs holding none (<see cref="Suspend"/>), and the gates are taken back when it returns. While
+/// the callback runs, an apply may go ahead under the statement that called it, as it always could before the
+/// gate.</para>
+/// </summary>
+internal static class ApplyGateHolds
+{
+    [ThreadStatic] private static List<ReaderWriterLockSlim>? t_held;
+
+    /// <summary>Take <paramref name="gate"/> shared for one native call (nothing for a local connection).</summary>
+    internal static void Enter(ReaderWriterLockSlim? gate)
+    {
+        if (gate is null)
+        {
+            return;
+        }
+
+        gate.EnterReadLock();
+        (t_held ??= []).Add(gate);
+    }
+
+    /// <summary>Let go of the <paramref name="gate"/> the matching <see cref="Enter"/> took.</summary>
+    internal static void Exit(ReaderWriterLockSlim? gate)
+    {
+        if (gate is null)
+        {
+            return;
+        }
+
+        t_held!.RemoveAt(t_held.Count - 1);
+        gate.ExitReadLock();
+    }
+
+    /// <summary>Release every gate this thread holds until the returned scope is disposed, then take them back in
+    /// the order they were taken. A statement the callback runs takes its own.</summary>
+    internal static Suspended Suspend()
+    {
+        var held = t_held;
+        if (held is null || held.Count == 0)
+        {
+            return default;
+        }
+
+        t_held = null;
+        for (var i = held.Count - 1; i >= 0; i--)
+        {
+            held[i].ExitReadLock();
+        }
+
+        return new Suspended(held);
+    }
+
+    internal readonly struct Suspended(List<ReaderWriterLockSlim>? held) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (held is null)
+            {
+                return;
+            }
+
+            foreach (var gate in held)
+            {
+                gate.EnterReadLock();
+            }
+
+            t_held = held;
+        }
+    }
+}
+
 /// <summary>A prepared statement. Binding is 1-based; column access is 0-based.</summary>
 public sealed class TursoRawStatement : IDisposable
 {
     private readonly Action? _pump;
+    private readonly ReaderWriterLockSlim? _applyGate;
     private IntPtr _statement;
     private bool _disposed;
 
-    internal TursoRawStatement(IntPtr statement, Action? pump)
+    internal TursoRawStatement(IntPtr statement, Action? pump, ReaderWriterLockSlim? applyGate = null)
     {
         _statement = statement;
         _pump = pump;
+        _applyGate = applyGate;
+    }
+
+    /// <summary>The statement's own IO after a step answered <c>Io</c>: the step's continuation, so it takes turns
+    /// with a pull's apply exactly as the step does. The sync pump before it holds nothing.</summary>
+    private TursoStatus RunIoOnce(out IntPtr errorPtr)
+    {
+        ApplyGateHolds.Enter(_applyGate);
+        try
+        {
+            return TursoNative.StatementRunIo(_statement, out errorPtr);
+        }
+        finally
+        {
+            ApplyGateHolds.Exit(_applyGate);
+        }
+    }
+
+    /// <summary>One native step, taking turns with a pull's apply (<see cref="TursoSyncDatabase.ApplyGate"/>).</summary>
+    private TursoStatus StepOnce(out IntPtr errorPtr)
+    {
+        ApplyGateHolds.Enter(_applyGate);
+        try
+        {
+            return TursoNative.StatementStep(_statement, out errorPtr);
+        }
+        finally
+        {
+            ApplyGateHolds.Exit(_applyGate);
+        }
     }
 
     /// <summary>Advance one row. Returns true on a row, false when the statement is done.</summary>
@@ -327,7 +448,7 @@ public sealed class TursoRawStatement : IDisposable
         ThrowIfDisposed();
         while (true)
         {
-            var status = TursoNative.StatementStep(_statement, out var errorPtr);
+            var status = StepOnce(out var errorPtr);
             switch (status)
             {
                 case TursoStatus.Row:
@@ -339,7 +460,7 @@ public sealed class TursoRawStatement : IDisposable
                 case TursoStatus.Io:
                     FreeIf(errorPtr);
                     _pump?.Invoke();                          // sync pump first (gated: null for local-only)…
-                    var io = TursoNative.StatementRunIo(_statement, out var ioErr);
+                    var io = RunIoOnce(out var ioErr);
                     TursoSyncDatabase.Check(io, ioErr, "statement_run_io"); // …then local statement IO
                     continue;
                 default:
