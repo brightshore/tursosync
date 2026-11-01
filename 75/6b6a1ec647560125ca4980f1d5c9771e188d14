@@ -1,0 +1,38 @@
+src/TursoSync/TursoNative.cs
+  s_39a534ffa60717::t_3eb280718ccf4c 90,109
+tests/TursoSync.Tests/TursoSyncHttpMessageTests.cs
+  s_39a534ffa60717::t_215ef0bcccca7c 98-124
+src/TursoSync/TursoSyncDatabase.cs
+  s_39a534ffa60717::t_3eb280718ccf4c 2,127,591-599,931-941,948
+tests/TursoSync.Tests/LiveSyncIntegrationTests.cs
+  s_39a534ffa60717::t_4179e8fef25ccf 142
+tests/TursoSync.Tests/TursoSyncHttpDiagnosticsTests.cs
+  s_39a534ffa60717::t_215ef0bcccca7c 2,13-82,234-241
+src/TursoSync/TursoException.cs
+  s_39a534ffa60717::t_8c16801486ecaf 10-11
+src/TursoSync/TursoSyncHttpDiagnostic.cs
+  s_39a534ffa60717::t_3eb280718ccf4c 15
+tests/TursoSync.Tests/TursoPushBatchingTests.cs
+  s_39a534ffa60717::t_bf1e55b33ebefb 203-212,214,216-263,332,341-348,437-448,450-456,458,460-462,486
+  s_39a534ffa60717::t_e073a47bf58176 457,459
+  s_39a534ffa60717::t_9810edfc11d314 264-299
+  s_39a534ffa60717::t_2b565a55e9dbb4 46-49,309-312,389-390
+tests/TursoSync.Tests/TursoNativeLayoutTests.cs
+  s_39a534ffa60717::t_215ef0bcccca7c 1-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "756b6a1ec647560125ca4980f1d5c9771e188d14",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
