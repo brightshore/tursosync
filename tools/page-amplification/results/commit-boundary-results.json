@@ -1,0 +1,265 @@
+{
+  "fixture_rows": 256,
+  "payload_bytes_per_row": 4096,
+  "steps": [
+    {
+      "wire_bytes": 4167,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "age_0s",
+      "commits_since_baseline": 1,
+      "elapsed_seconds": 0.312,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 4167,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "commit_1",
+      "commits_since_baseline": 1,
+      "elapsed_seconds": 0.831,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 4167,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "commit_257",
+      "commits_since_baseline": 257,
+      "elapsed_seconds": 9.943,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 4168,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "commit_289",
+      "commits_since_baseline": 289,
+      "elapsed_seconds": 11.543,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 4168,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "commit_321",
+      "commits_since_baseline": 321,
+      "elapsed_seconds": 13.095,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 4168,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "commit_353",
+      "commits_since_baseline": 353,
+      "elapsed_seconds": 14.633,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 4169,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "commit_385",
+      "commits_since_baseline": 385,
+      "elapsed_seconds": 16.141,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 4169,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "commit_417",
+      "commits_since_baseline": 417,
+      "elapsed_seconds": 17.734,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 4169,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "commit_449",
+      "commits_since_baseline": 449,
+      "elapsed_seconds": 19.246,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 4169,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "commit_481",
+      "commits_since_baseline": 481,
+      "elapsed_seconds": 20.747,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 131391,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "commit_513",
+      "commits_since_baseline": 513,
+      "elapsed_seconds": 22.48,
+      "returned_pages": 32,
+      "changed_pages": 1,
+      "unchanged_pages": 31,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147,
+        148,
+        149,
+        150,
+        151,
+        152,
+        153,
+        154,
+        155,
+        156,
+        157,
+        158,
+        159
+      ],
+      "complete_32_page_groups": 1,
+      "verified_marker": 101
+    }
+  ],
+  "mode": "cloud",
+  "completed": true,
+  "cloud_database": "tursosync-page-probe-28e855c8b88f",
+  "cloud_database_removed": true,
+  "initial": {
+    "wire_bytes": 1190093,
+    "protocol": 1,
+    "database_pages": 290
+  },
+  "sqlite_version": "3.47.0",
+  "journal_mode": "wal",
+  "recent_revision_control": {
+    "wire_bytes": 4167,
+    "protocol": 1,
+    "database_pages": 290,
+    "returned_pages": 1,
+    "changed_pages": 1,
+    "unchanged_pages": 0
+  }
+}

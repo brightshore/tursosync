@@ -1,0 +1,168 @@
+{
+  "fixture_rows": 256,
+  "payload_bytes_per_row": 4096,
+  "results": {
+    "local_0_8_3": {
+      "bootstrap": {
+        "wire_bytes": 1190043,
+        "protocol": 1,
+        "database_pages": 290,
+        "returned_pages": 290
+      },
+      "steps": [
+        {
+          "wire_bytes": 13,
+          "protocol": 1,
+          "database_pages": 290,
+          "step": "no_write_control",
+          "returned_pages": 0,
+          "changed_pages": 0,
+          "unchanged_pages": 0,
+          "changed_page_ids": [],
+          "returned_page_ids": [],
+          "complete_32_page_groups": 0,
+          "revision_changed": false,
+          "verified_marker": 100
+        },
+        {
+          "wire_bytes": 16426,
+          "protocol": 1,
+          "database_pages": 291,
+          "step": "one_row_update_1",
+          "returned_pages": 4,
+          "changed_pages": 4,
+          "unchanged_pages": 0,
+          "changed_page_ids": [
+            0,
+            146,
+            147,
+            290
+          ],
+          "returned_page_ids": [
+            0,
+            146,
+            147,
+            290
+          ],
+          "complete_32_page_groups": 0,
+          "revision_changed": true,
+          "verified_marker": 101
+        },
+        {
+          "wire_bytes": 16426,
+          "protocol": 1,
+          "database_pages": 291,
+          "step": "one_row_update_2",
+          "returned_pages": 4,
+          "changed_pages": 4,
+          "unchanged_pages": 0,
+          "changed_page_ids": [
+            0,
+            146,
+            147,
+            290
+          ],
+          "returned_page_ids": [
+            0,
+            146,
+            147,
+            290
+          ],
+          "complete_32_page_groups": 0,
+          "revision_changed": true,
+          "verified_marker": 102
+        },
+        {
+          "wire_bytes": 13,
+          "protocol": 1,
+          "database_pages": 291,
+          "step": "same_value_update",
+          "returned_pages": 0,
+          "changed_pages": 0,
+          "unchanged_pages": 0,
+          "changed_page_ids": [],
+          "returned_page_ids": [],
+          "complete_32_page_groups": 0,
+          "revision_changed": false,
+          "verified_marker": 102
+        }
+      ]
+    },
+    "cloud_regular": {
+      "bootstrap": {
+        "wire_bytes": 1190093,
+        "protocol": 1,
+        "database_pages": 290,
+        "returned_pages": 290
+      },
+      "steps": [
+        {
+          "wire_bytes": 63,
+          "protocol": 1,
+          "database_pages": 290,
+          "step": "no_write_control",
+          "returned_pages": 0,
+          "changed_pages": 0,
+          "unchanged_pages": 0,
+          "changed_page_ids": [],
+          "returned_page_ids": [],
+          "complete_32_page_groups": 0,
+          "revision_changed": true,
+          "verified_marker": 100
+        },
+        {
+          "wire_bytes": 4167,
+          "protocol": 1,
+          "database_pages": 290,
+          "step": "one_row_update_1",
+          "returned_pages": 1,
+          "changed_pages": 1,
+          "unchanged_pages": 0,
+          "changed_page_ids": [
+            147
+          ],
+          "returned_page_ids": [
+            147
+          ],
+          "complete_32_page_groups": 0,
+          "revision_changed": true,
+          "verified_marker": 101
+        },
+        {
+          "wire_bytes": 4167,
+          "protocol": 1,
+          "database_pages": 290,
+          "step": "one_row_update_2",
+          "returned_pages": 1,
+          "changed_pages": 1,
+          "unchanged_pages": 0,
+          "changed_page_ids": [
+            147
+          ],
+          "returned_page_ids": [
+            147
+          ],
+          "complete_32_page_groups": 0,
+          "revision_changed": true,
+          "verified_marker": 102
+        },
+        {
+          "wire_bytes": 63,
+          "protocol": 1,
+          "database_pages": 290,
+          "step": "same_value_update",
+          "returned_pages": 0,
+          "changed_pages": 0,
+          "unchanged_pages": 0,
+          "changed_page_ids": [],
+          "returned_page_ids": [],
+          "complete_32_page_groups": 0,
+          "revision_changed": false,
+          "verified_marker": 102
+        }
+      ]
+    }
+  },
+  "cloud_database_removed": true,
+  "cloud_database": "foxery-page-probe-20261101-333af030"
+}

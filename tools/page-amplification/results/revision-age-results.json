@@ -1,0 +1,186 @@
+{
+  "steps": [
+    {
+      "wire_bytes": 4167,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "revision_age_0s",
+      "elapsed_seconds": 0.23,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "same_server_revision_as_first": true,
+      "revision_sha256": "11e5aceab2b97a6697f43ed1a2a6d7e97380e69fe3dce13f5b4d704bd903c39b",
+      "revision_bytes": 53
+    },
+    {
+      "wire_bytes": 4167,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "revision_age_5s",
+      "elapsed_seconds": 5.25,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "same_server_revision_as_first": true,
+      "revision_sha256": "11e5aceab2b97a6697f43ed1a2a6d7e97380e69fe3dce13f5b4d704bd903c39b",
+      "revision_bytes": 53
+    },
+    {
+      "wire_bytes": 4167,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "revision_age_30s",
+      "elapsed_seconds": 30.24,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "same_server_revision_as_first": true,
+      "revision_sha256": "11e5aceab2b97a6697f43ed1a2a6d7e97380e69fe3dce13f5b4d704bd903c39b",
+      "revision_bytes": 53
+    },
+    {
+      "wire_bytes": 4167,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "revision_age_120s",
+      "elapsed_seconds": 120.3,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "same_server_revision_as_first": true,
+      "revision_sha256": "11e5aceab2b97a6697f43ed1a2a6d7e97380e69fe3dce13f5b4d704bd903c39b",
+      "revision_bytes": 53
+    },
+    {
+      "wire_bytes": 4167,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "revision_age_300s",
+      "elapsed_seconds": 300.31,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "same_server_revision_as_first": true,
+      "revision_sha256": "11e5aceab2b97a6697f43ed1a2a6d7e97380e69fe3dce13f5b4d704bd903c39b",
+      "revision_bytes": 53
+    },
+    {
+      "wire_bytes": 4167,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "after_checkpoint",
+      "elapsed_seconds": 300.76,
+      "returned_pages": 1,
+      "changed_pages": 1,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        147
+      ],
+      "complete_32_page_groups": 0,
+      "same_server_revision_as_first": true,
+      "revision_sha256": "11e5aceab2b97a6697f43ed1a2a6d7e97380e69fe3dce13f5b4d704bd903c39b",
+      "revision_bytes": 53
+    },
+    {
+      "wire_bytes": 131393,
+      "protocol": 1,
+      "database_pages": 290,
+      "label": "after_1100_commits",
+      "elapsed_seconds": 337.06,
+      "returned_pages": 32,
+      "changed_pages": 1,
+      "unchanged_pages": 31,
+      "changed_page_ids": [
+        147
+      ],
+      "returned_page_ids": [
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147,
+        148,
+        149,
+        150,
+        151,
+        152,
+        153,
+        154,
+        155,
+        156,
+        157,
+        158,
+        159
+      ],
+      "complete_32_page_groups": 1,
+      "same_server_revision_as_first": false,
+      "revision_sha256": "6e454308fee672cb42e8388ea2c935e07dfde92334d74a6bbfe3fcadb157355f",
+      "revision_bytes": 55
+    }
+  ],
+  "cloud_database_removed": true,
+  "cloud_database": "foxery-page-age-20261101-b01a52dd",
+  "initial": {
+    "wire_bytes": 1190093,
+    "protocol": 1,
+    "database_pages": 290,
+    "revision_bytes": 53
+  },
+  "sqlite_version": "3.47.0",
+  "journal_mode": "wal",
+  "checkpoint_error": "Fixture SQL failed: SQL_PARSE_ERROR"
+}
