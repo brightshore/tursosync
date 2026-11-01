@@ -1,5 +1,10 @@
 # TursoSync
 
+## 1.9.2
+### 🩹 Fixes
+
+- Preserve parent references during sync replay and queued uploads; reduce response traffic with gzip and correct native configuration layout.
+
 ## 1.9.1
 ### 🩹 Fixes
 
