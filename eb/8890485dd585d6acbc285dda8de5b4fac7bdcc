@@ -1,0 +1,11 @@
+tools/page-amplification/results/wal-filter-results.json
+  ai_agent 1-16
+tools/page-amplification/README.md
+  ai_agent 90-113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "eb8890485dd585d6acbc285dda8de5b4fac7bdcc",
+  "prompts": {}
+}
