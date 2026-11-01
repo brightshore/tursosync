@@ -95,6 +95,34 @@ public class TursoSyncHttpMessageTests
     }
 
     [TestMethod]
+    [DataRow("application/protobuf")]
+    [DataRow("application/json")]
+    public void BuildHttpMessage_NegotiatesGzip_InsteadOfNativeMimeEncoding(string mime)
+    {
+        var headers = new[] { new KeyValuePair<string, string>("AcCePt-EnCoDiNg", mime) };
+        using var message = TursoSyncDatabase.BuildHttpMessage(
+            "POST", "https://example.turso.io/pull-updates", [], headers, authToken: null, host: null);
+
+        message.Headers.AcceptEncoding.Should().ContainSingle().Which.Value.Should().Be("gzip");
+        message.Headers.Accept.Should().ContainSingle().Which.MediaType.Should().Be(mime);
+    }
+
+    [TestMethod]
+    public void BuildHttpMessage_NegotiatesOnlySupportedEncoding_AndPreservesAccept()
+    {
+        var headers = new[]
+        {
+            new KeyValuePair<string, string>("Accept", "application/json"),
+            new KeyValuePair<string, string>("Accept-Encoding", "br, gzip"),
+        };
+        using var message = TursoSyncDatabase.BuildHttpMessage(
+            "GET", "https://example.turso.io/info", null, headers, authToken: null, host: null);
+
+        message.Headers.AcceptEncoding.Should().ContainSingle().Which.Value.Should().Be("gzip");
+        message.Headers.Accept.Should().ContainSingle().Which.MediaType.Should().Be("application/json");
+    }
+
+    [TestMethod]
     public void BuildHttpMessage_SetsHost()
     {
         using var message = TursoSyncDatabase.BuildHttpMessage(

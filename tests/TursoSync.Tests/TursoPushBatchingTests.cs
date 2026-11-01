@@ -43,8 +43,10 @@ public class TursoPushBatchingTests
             await using var server = new PushRemote();
             var options = new TursoConnectionStringBuilder
             {
-                DataSource = Path.Combine(dir.FullName, "store.db"), RemoteUrl = server.Url,
-                Pooling = pooling, SchemaGuard = TursoSchemaGuardMode.Off,
+                DataSource = Path.Combine(dir.FullName, "store.db"),
+                RemoteUrl = server.Url,
+                Pooling = pooling,
+                SchemaGuard = TursoSchemaGuardMode.Off,
             };
             var defaultThreshold = options.ConnectionString;
             options.PushOperationsThreshold = 1000;
@@ -198,6 +200,103 @@ public class TursoPushBatchingTests
         });
     }
 
+    [TestMethod]
+    [DataRow("NO ACTION", false)]
+    [DataRow("CASCADE", false)]
+    [DataRow("NO ACTION", true)]
+    public async Task Queued_Replacement_Updates_Preserve_Children_And_Resume_After_A_Failure(string onDelete, bool failFirst)
+    {
+        await WithReplica(2, (db, conn, server) =>
+        {
+            server.UseSqlDatabase();
+            conn.Execute("CREATE TABLE lane (id TEXT PRIMARY KEY, status TEXT)");
+            conn.Execute($"CREATE TABLE file_edit (id INTEGER PRIMARY KEY, lane_id TEXT REFERENCES lane(id) ON DELETE {onDelete}, contents BLOB)");
+            conn.Execute("INSERT INTO lane VALUES ('lane', 'old')");
+            conn.Execute("INSERT INTO file_edit VALUES (1, 'lane', X'00')");
+            db.Push();
+            var acknowledged = server.Watermark;
+            conn.Execute("BEGIN");
+            conn.Execute("DELETE FROM lane WHERE id='lane'");
+            conn.Execute("INSERT INTO lane VALUES ('lane', 'batch-row-new')");
+            conn.Execute("COMMIT");
+            server.FailStatementRow = failFirst ? "batch-row-new" : null;
+            if (failFirst)
+            {
+                Action push = db.Push;
+                push.Should().Throw<TursoException>();
+                server.Watermark.Should().Be(acknowledged);
+                server.QueryScalar("SELECT status FROM lane").Should().Be("old");
+                server.QueryScalar("SELECT count(*) FROM file_edit").Should().Be(1L);
+                server.FailStatementRow = null;
+            }
+
+            db.Push();
+
+            server.QueryScalar("SELECT status FROM lane").Should().Be("batch-row-new");
+            server.QueryScalar("SELECT count(*) FROM file_edit").Should().Be(1L);
+            db.Stats().CdcOperations.Should().Be(0, "the merged operation must acknowledge both original CDC records");
+        });
+    }
+
+    [TestMethod]
+    public async Task Replacement_Updates_Do_Not_Merge_Across_Source_Transactions()
+    {
+        await WithReplica(0, (db, conn, server) =>
+        {
+            server.UseSqlDatabase();
+            conn.Execute("CREATE TABLE lane (id TEXT PRIMARY KEY, status TEXT)");
+            conn.Execute("CREATE TABLE file_edit (lane_id TEXT REFERENCES lane(id))");
+            conn.Execute("INSERT INTO lane VALUES ('lane', 'old')");
+            conn.Execute("INSERT INTO file_edit VALUES ('lane')");
+            db.Push();
+            var acknowledged = server.Watermark;
+            conn.Execute("DELETE FROM lane WHERE id='lane'");
+            conn.Execute("INSERT INTO lane VALUES ('lane', 'new')");
+
+            Action push = db.Push;
+            push.Should().Throw<TursoException>().WithMessage("*FOREIGN KEY*");
+            server.Watermark.Should().Be(acknowledged);
+            server.QueryScalar("SELECT status FROM lane").Should().Be("old");
+            server.QueryScalar("SELECT count(*) FROM file_edit").Should().Be(1L);
+        });
+    }
+
+    [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task Replacement_Updates_Use_Integer_Rowid_Identity_And_Reject_Key_Changes(bool sameKey)
+    {
+        await WithReplica(0, (db, conn, server) =>
+        {
+            server.UseSqlDatabase();
+            conn.Execute("CREATE TABLE lane (id INTEGER PRIMARY KEY, status TEXT)");
+            conn.Execute("CREATE TABLE file_edit (lane_id INTEGER REFERENCES lane(id))");
+            conn.Execute("INSERT INTO lane VALUES (1, 'old')");
+            conn.Execute("INSERT INTO file_edit VALUES (1)");
+            db.Push();
+            var acknowledged = server.Watermark;
+            conn.Execute("BEGIN");
+            conn.Execute("DELETE FROM lane WHERE id=1");
+            conn.Execute($"INSERT INTO lane VALUES ({(sameKey ? 1 : 2)}, 'new')");
+            conn.Execute("COMMIT");
+
+            if (sameKey)
+            {
+                db.Push();
+                server.QueryScalar("SELECT status FROM lane WHERE id=1").Should().Be("new");
+                db.Stats().CdcOperations.Should().Be(0);
+            }
+            else
+            {
+                Action push = db.Push;
+                push.Should().Throw<TursoException>().WithMessage("*FOREIGN KEY*");
+                server.Watermark.Should().Be(acknowledged);
+                server.QueryScalar("SELECT status FROM lane WHERE id=1").Should().Be("old");
+            }
+            server.QueryScalar("SELECT count(*) FROM file_edit").Should().Be(1L);
+        });
+    }
+
     private static async Task WithReplica(int? threshold, Action<TursoSyncDatabase, TursoRawConnection, PushRemote> test)
     {
         if (!TursoNativeLibrary.IsAvailable()) Assert.Inconclusive("turso_sync_sdk_kit native library not found");
@@ -207,8 +306,10 @@ public class TursoPushBatchingTests
             await using var server = new PushRemote();
             var config = new TursoSyncConfig
             {
-                Path = Path.Combine(dir.FullName, "store.db"), RemoteUrl = server.Url,
-                BootstrapIfEmpty = false, SchemaGuard = TursoSchemaGuardMode.Off,
+                Path = Path.Combine(dir.FullName, "store.db"),
+                RemoteUrl = server.Url,
+                BootstrapIfEmpty = false,
+                SchemaGuard = TursoSchemaGuardMode.Off,
             };
             if (threshold is { } value) config = config with { PushOperationsThreshold = value };
             using var db = TursoSyncDatabase.Create(config);
@@ -228,6 +329,7 @@ public class TursoPushBatchingTests
         private readonly CancellationTokenSource _stop = new();
         private readonly Task _serve;
         private JsonElement[]? _watermark;
+        private TursoRawConnection? _database;
         public string Url { get; }
         public List<string[]> Batches { get; } = [];
         public int? FailBatch { get; set; }
@@ -235,6 +337,18 @@ public class TursoPushBatchingTests
         public bool FailCommit { get; set; }
         public bool LastBatchLeftTransactionOpen { get; private set; }
         public string? Watermark => _watermark is null ? null : JsonSerializer.Serialize(_watermark);
+
+        public void UseSqlDatabase()
+        {
+            _database = TursoRawConnection.OpenLocal(new TursoSyncConfig { Path = ":memory:" });
+            _database.Execute("PRAGMA foreign_keys=ON");
+            _database.QueryScalar("PRAGMA foreign_keys").Should().Be(1L);
+        }
+
+        public object? QueryScalar(string sql) => _database!.QueryScalar(sql);
+
+        private static byte[] DecodeBlob(string value) =>
+            Convert.FromBase64String(value.PadRight((value.Length + 3) / 4 * 4, '='));
 
         public PushRemote()
         {
@@ -272,7 +386,8 @@ public class TursoPushBatchingTests
                     var result = fail ? null : ExecuteBatch(steps);
                     var responseBody = fail ? "rejected batch" : JsonSerializer.Serialize(new
                     {
-                        baton = (string?)null, base_url = (string?)null,
+                        baton = (string?)null,
+                        base_url = (string?)null,
                         results = new[] { new { type = "ok", response = new { type = "batch", result } } },
                     });
                     var payload = Encoding.UTF8.GetBytes(responseBody);
@@ -319,6 +434,32 @@ public class TursoPushBatchingTests
                     errors[current] = new { message = "SQLite error: FOREIGN KEY constraint failed", code = "SQLITE_CONSTRAINT" };
                     continue;
                 }
+                if (_database is not null)
+                {
+                    try
+                    {
+                        using var command = _database.Prepare(sql);
+                        for (var i = 0; i < args.Length; i++)
+                        {
+                            object? value = args[i].GetProperty("type").GetString() switch
+                            {
+                                "integer" => long.Parse(args[i].GetProperty("value").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                                "float" => args[i].GetProperty("value").GetDouble(),
+                                "text" => args[i].GetProperty("value").GetString(),
+                                "blob" => DecodeBlob(args[i].GetProperty("base64").GetString()!),
+                                "null" => null,
+                                _ => throw new InvalidOperationException("Unexpected Hrana value type"),
+                            };
+                            command.Bind(i + 1, value);
+                        }
+                        while (command.Step()) { }
+                    }
+                    catch (TursoException ex)
+                    {
+                        errors[current] = new { message = ex.Message, code = "SQLITE_ERROR" };
+                        continue;
+                    }
+                }
                 if (sql.StartsWith("BEGIN", StringComparison.Ordinal)) inTransaction = true;
                 else if (sql == "ROLLBACK") { inTransaction = false; pendingRows.Clear(); pendingWatermark = _watermark; }
                 else if (sql == "COMMIT")
@@ -342,6 +483,7 @@ public class TursoPushBatchingTests
             await _stop.CancelAsync();
             _listener.Stop();
             await _serve;
+            _database?.Dispose();
             _stop.Dispose();
         }
     }

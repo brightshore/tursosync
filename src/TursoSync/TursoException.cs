@@ -7,7 +7,8 @@ namespace Turso.Sync;
 /// <param name="LastPullUnixTime">Unix time of the last successful pull.</param>
 /// <param name="LastPushUnixTime">Unix time of the last successful push.</param>
 /// <param name="NetworkSentBytes">Total bytes sent over the network.</param>
-/// <param name="NetworkReceivedBytes">Total bytes received over the network.</param>
+/// <param name="NetworkReceivedBytes">Total response bytes delivered to the native engine, after HTTP
+/// decompression. <see cref="TursoSyncHttpDiagnostic.ActualResponseBytes"/> measures transport body bytes instead.</param>
 /// <param name="Revision">Opaque server revision string.</param>
 public sealed record TursoStats(
     long CdcOperations,

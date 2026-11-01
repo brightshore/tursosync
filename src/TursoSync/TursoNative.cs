@@ -87,7 +87,7 @@ internal struct TursoDatabaseConfig
 
 /// <summary>
 /// Synced database config (<c>turso_sync_database_config_t</c>). Field order, sizes and padding mirror the
-/// C header exactly, including the two trailing <c>size_t</c> thresholds the Go binding predates.
+/// C header exactly, including the thresholds and trailing logical-pull override.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct TursoSyncDatabaseConfig
@@ -106,6 +106,7 @@ internal struct TursoSyncDatabaseConfig
     public IntPtr RemoteEncryptionCipher;
     public nuint PushOperationsThreshold;
     public nuint PullBytesThreshold;
+    [MarshalAs(UnmanagedType.I1)] public bool LogicalMvccPull;
 }
 
 /// <summary>HTTP IO request fields (<c>turso_sync_io_http_request_t</c>).</summary>

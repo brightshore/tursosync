@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -123,6 +124,7 @@ public sealed partial class TursoSyncDatabase : IDisposable
                 BootstrapIfEmpty = config.BootstrapIfEmpty,
                 PushOperationsThreshold = (nuint)config.PushOperationsThreshold,
                 PullBytesThreshold = (nuint)Math.Max(0, config.PullBytesThreshold),
+                LogicalMvccPull = false,
             };
 
             var status = TursoNative.SyncDatabaseNew(ref dbConfig, ref syncConfig, out db, out var errorPtr);
@@ -586,7 +588,15 @@ public sealed partial class TursoSyncDatabase : IDisposable
             onStatus(status.Value);
             using var stream = response.Content.ReadAsStream();
             body = new IdleTimeoutStream(stream, http.Timeout);
-            readBody(body);
+            using (body)
+            {
+                // Count compressed bytes and time each network read, below the decompressor's buffering.
+                using var gzip = response.Content.Headers.ContentEncoding.Count == 1
+                    && response.Content.Headers.ContentEncoding.First().Equals("gzip", StringComparison.OrdinalIgnoreCase)
+                    ? new GZipStream(body, CompressionMode.Decompress, leaveOpen: true)
+                    : null;
+                readBody(gzip ?? (Stream)body);
+            }
             failure = TursoSyncHttpFailurePhase.None;
         }
         finally
@@ -918,11 +928,24 @@ public sealed partial class TursoSyncDatabase : IDisposable
                 continue;
             }
 
+            if (header.Key.Equals("Accept-Encoding", StringComparison.OrdinalIgnoreCase))
+            {
+                // The pinned engine puts the response MIME type in Accept-Encoding instead of Accept.
+                if (header.Value.StartsWith("application/", StringComparison.OrdinalIgnoreCase)
+                    && !headers.Any(h => h.Key.Equals("Accept", StringComparison.OrdinalIgnoreCase)))
+                {
+                    message.Headers.TryAddWithoutValidation("Accept", header.Value);
+                }
+                continue;
+            }
+
             if (!message.Headers.TryAddWithoutValidation(header.Key, header.Value))
             {
                 message.Content?.Headers.TryAddWithoutValidation(header.Key, header.Value);
             }
         }
+
+        message.Headers.AcceptEncoding.ParseAdd("gzip");
 
         if (!string.IsNullOrEmpty(authToken))
         {
