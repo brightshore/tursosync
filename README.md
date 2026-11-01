@@ -131,6 +131,10 @@ real transactions larger than the threshold still remain intact. A backlog
 already collapsed by an earlier engine cannot regain its lost boundaries. Set
 `Http Timeout=-1` to allow its large upload to finish without a client deadline.
 
+The pinned 0.8.3 engine also includes the upstream [CDC upsert fix](https://github.com/tursodatabase/turso/pull/10159).
+It captures the previous row before an `ON CONFLICT DO UPDATE` overwrites it. Reading that row afterward
+could produce an incorrect before-image or fail with invalid text/blob errors on sync replicas.
+
 ## Full-text search
 
 Tantivy FTS is behind the engine's experimental `index_method` feature, so opt in with
