@@ -87,3 +87,27 @@ that checkpoint frequency depends on write volume and pattern. This is consisten
 with the observed 32 × 4 KiB responses. Crossing a server checkpoint/generation
 boundary is the leading explanation, but the probe cannot inspect server
 checkpoint state or its page-selection implementation.
+
+## Local WAL regression and fix
+
+[PR #33](https://github.com/brightshore/tursosync/pull/33) adds the maintained native
+patch for skipping unchanged incoming pages after local rollback. The retained
+`wal-filter-results.json` records the real-database regression: the original code
+wrote 74 frames for 74 unchanged pages; the patched code writes one commit frame.
+A 75-page response with three changed pages writes three frames. The test checks
+row values and `integrity_check`, overlapping local edits and rollback, database
+growth, and the path with filtering disabled. This measures local WAL writes;
+it does not change the cloud page-selection measurements above.
+
+After checking out the pinned native engine and applying the maintained patches,
+run its regression **from the native engine directory** so Cargo loads its compiler
+configuration:
+
+```sh
+cargo test -p turso_sync_engine --lib unchanged_pulled_pages_do_not_refill_wal -- --nocapture
+```
+
+The source audit in `prerelease-page-apply-audit.json` compares the relevant
+WAL-apply and page-append functions across 0.8.3, both 0.9.0 prereleases, and the
+recorded upstream main commit. They are byte-identical. This is a source audit,
+not a claim that prerelease binaries were tested.

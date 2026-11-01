@@ -1,0 +1,16 @@
+{
+  "native_unit_tests_passed": 117,
+  "native_unit_tests_ignored": 1,
+  "sdk_tests_passed": 242,
+  "sdk_tests_skipped": 22,
+  "native_counts": [
+    "skip=true remote_changed=false local_changed=false: returned=74 changed=0 rollback=0 written=1",
+    "skip=true remote_changed=true local_changed=false: returned=75 changed=3 rollback=0 written=3",
+    "skip=true remote_changed=false local_changed=true: returned=74 changed=0 rollback=4 written=1",
+    "skip=true remote_changed=true local_changed=true: returned=75 changed=3 rollback=4 written=3",
+    "skip=false remote_changed=false local_changed=false: returned=74 changed=0 rollback=0 written=74",
+    "skip=false remote_changed=true local_changed=true: returned=75 changed=3 rollback=4 written=75"
+  ],
+  "old_regression_failure": "returned 74 pages, changed 0, rolled back 0, wrote 74",
+  "pr": "https://github.com/brightshore/tursosync/pull/33"
+}
