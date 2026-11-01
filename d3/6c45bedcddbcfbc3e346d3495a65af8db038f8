@@ -1,0 +1,21 @@
+.github/workflows/integration.yml
+  s_39a534ffa60717::t_6067244a83f72e 81-82
+.github/workflows/release.yml
+  s_39a534ffa60717::t_6067244a83f72e 65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "d36c45bedcddbcfbc3e346d3495a65af8db038f8",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
