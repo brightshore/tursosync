@@ -155,7 +155,7 @@ release** — debug builds are ~25× slower.
 
 The Turso engine (the `turso_sync_sdk_kit` native) is **not vendored** — CI builds it from
 [tursodatabase/turso](https://github.com/tursodatabase/turso) at the commit pinned in
-[`turso-engine.json`](turso-engine.json), currently the stable **v0.7.0** release. The pin keeps builds
+[`turso-engine.json`](turso-engine.json), currently the stable **v0.8.3** release. The pin keeps builds
 reproducible and lets us validate each engine bump before adopting it.
 
 - Bump it with `scripts/bump-turso.sh <tag|latest>` (resolves the tag → commit SHA).
