@@ -113,7 +113,7 @@ jobs:
           (
             cd turso
             cargo build -p turso_sync_sdk_kit --features turso_sdk_kit/fts --release
-            cargo test -p turso_sync_engine --features turso_core/fts --release --lib unchanged_pulled_pages_do_not_refill_wal -- --nocapture
+            cargo test -p turso_sync_engine -p turso_sync_sdk_kit --features turso_sdk_kit/fts --release --lib unchanged_pulled_pages_do_not_refill_wal -- --nocapture
           )
           mkdir -p turso-bin
           # cdylib name varies by OS (lib*.so / lib*.dylib / *.dll); copy whichever exists.

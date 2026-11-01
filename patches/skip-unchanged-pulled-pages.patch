@@ -1,7 +1,7 @@
 diff --git a/sync/engine/src/database_tape.rs b/sync/engine/src/database_tape.rs
 --- a/sync/engine/src/database_tape.rs
 +++ b/sync/engine/src/database_tape.rs
-@@ -333,6 +333,29 @@
+@@ -333,6 +333,36 @@
          self.prepared_frame = Some((page_no, frame));
  
          Ok(())
@@ -14,6 +14,13 @@ diff --git a/sync/engine/src/database_tape.rs b/sync/engine/src/database_tape.rs
 +        page: &[u8],
 +        current: &mut [u8],
 +    ) -> Result<bool> {
++        if page.len() != self.page_size {
++            return Err(Error::DatabaseTapeError(format!(
++                "page.len() must be equal to page_size: {} != {}",
++                page.len(),
++                self.page_size
++            )));
++        }
 +        if let Some((prepared_page_no, frame)) = &self.prepared_frame {
 +            if *prepared_page_no == page_no {
 +                return Ok(&frame[WAL_FRAME_HEADER..] == page);
@@ -88,7 +95,7 @@ diff --git a/sync/engine/src/database_sync_operations.rs b/sync/engine/src/datab
      Ok(db_size)
  }
  
-@@ -4273,6 +4291,185 @@
+@@ -4273,6 +4291,197 @@
      }
  
      #[test]
@@ -99,13 +106,14 @@ diff --git a/sync/engine/src/database_sync_operations.rs b/sync/engine/src/datab
 +        };
 +        use turso_core::{Database, IO};
 +
-+        for (remote_changed, local_changed, skip_unchanged) in [
-+            (false, false, true),
-+            (true, false, true),
-+            (false, true, true),
-+            (true, true, true),
-+            (false, false, false),
-+            (true, true, false),
++        for (remote_changed, local_changed, skip_unchanged, page_size) in [
++            (false, false, true, 8192),
++            (false, false, true, 4096),
++            (true, false, true, 4096),
++            (false, true, true, 4096),
++            (true, true, true, 4096),
++            (false, false, false, 4096),
++            (true, true, false, 4096),
 +        ] {
 +            let directory = tempfile::tempdir().expect("test directory");
 +            let source_path = directory.path().join("source.db");
@@ -123,6 +131,8 @@ diff --git a/sync/engine/src/database_sync_operations.rs b/sync/engine/src/datab
 +                move |coro| async move {
 +                    let coro: Coro<()> = coro.into();
 +                    let conn = source.connect().expect("source connection");
++                    conn.execute(format!("PRAGMA page_size={page_size}"))
++                        .expect("fixture page size");
 +                    for sql in [
 +                        "CREATE TABLE probe(id INTEGER PRIMARY KEY, marker INTEGER, payload BLOB)",
 +                        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<64) INSERT INTO probe SELECT x,100,zeroblob(4096) FROM n",
@@ -210,14 +220,23 @@ diff --git a/sync/engine/src/database_sync_operations.rs b/sync/engine/src/datab
 +                        .await
 +                        .expect("rollback local changes");
 +                    let before = session.frames_count().expect("before frames");
-+                    let size = super::wal_apply_from_file(
++                    let applied = super::wal_apply_from_file(
 +                        &coro,
 +                        &frames_file,
 +                        &mut session,
 +                        skip_unchanged,
 +                    )
-+                    .await
-+                    .expect("apply remote frames");
++                    .await;
++                    if page_size != super::PAGE_SIZE {
++                        let error = applied.expect_err("incompatible page sizes must be rejected");
++                        assert!(error
++                            .to_string()
++                            .contains("page.len() must be equal to page_size"));
++                        assert_eq!(session.frames_count().expect("unchanged WAL"), before);
++                        session.wal_session.end(false).expect("end rejected apply");
++                        return;
++                    }
++                    let size = applied.expect("apply remote frames");
 +                    assert_eq!(size, database_pages as u32);
 +                    session.commit(size).expect("commit remote pages");
 +                    let written = session.frames_count().expect("after frames") - before;
