@@ -78,6 +78,8 @@ jobs:
       - name: Setup Rust
         if: steps.turso-bin.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.88'
 
       - name: Checkout Turso engine
         if: steps.turso-bin.outputs.cache-hit != 'true'

@@ -62,6 +62,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: '1.88'
           targets: ${{ matrix.target }}
 
       - name: Checkout Turso engine
