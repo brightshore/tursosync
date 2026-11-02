@@ -1,0 +1,19 @@
+src/TursoSync.DbUp/CHANGELOG.md
+  s_39a534ffa60717::t_6c668d6a3d58f5 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "b372985a0d92bb676c781b091ef2ef2b86645179",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": null
+    }
+  }
+}
