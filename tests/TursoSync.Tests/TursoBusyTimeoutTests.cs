@@ -146,7 +146,6 @@ public class TursoBusyTimeoutTests
 
             Task<TursoException?>? write = null;
             var queued = false;
-            var sw = new Stopwatch();
             db.CheckpointStarting = () =>
             {
                 write = Task.Run(() =>
@@ -162,11 +161,13 @@ public class TursoBusyTimeoutTests
                     }
                 });
                 queued = SpinWait.SpinUntil(() => db.ApplyGate.WaitingReadCount > 0, TimeSpan.FromSeconds(5));
-                sw.Start();
             };
 
             try { db.Checkpoint(); }
             catch (TursoException ex) when (ex.IsBusy) { /* the open read transaction may refuse it */ }
+
+            // From here, not earlier: the checkpoint's own run time isn't the write's.
+            var sw = Stopwatch.StartNew();
 
             // Before any assertion: the connection and database are disposed on the way out, under a running write.
             write!.Wait(TimeSpan.FromSeconds(30)).Should().BeTrue("the write finishes once the checkpoint lets it through");
