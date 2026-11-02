@@ -71,6 +71,9 @@ public sealed class TursoRawConnection : IDisposable
     /// <summary>True if any UDF/aggregate/collation has been registered on this connection.</summary>
     public bool HasExtensions => _extensionHandles.Count > 0;
 
+    /// <summary>True if a transaction is open on this connection.</summary>
+    internal bool InTransaction => !TursoNative.ConnectionGetAutocommit(_connection);
+
     /// <summary>Open a connection to a synced <paramref name="database"/> (pumps sync IO per statement step).</summary>
     public static TursoRawConnection Open(TursoSyncDatabase database, int busyTimeoutMs = 5000)
     {
@@ -142,25 +145,62 @@ public sealed class TursoRawConnection : IDisposable
             {
                 return PrepareOnce(sql);
             }
-            catch (TursoException ex) when ((ex.IsBusy || ex.IsBusySnapshot) && TursoNative.ConnectionGetAutocommit(_connection))
+            catch (TursoException ex) when ((ex.IsBusy || ex.IsBusySnapshot) && !InTransaction)
             {
-                // Same rules as TursoSyncDatabase.Connect: the busy timeout bounds the whole prepare, so never
-                // sleep past the deadline and never attempt once it has passed.
-                var remaining = deadline - Environment.TickCount64;
-                if (remaining <= 0)
+                if (!WaitForRetry(deadline, ref backoffMs))
                 {
                     throw;
                 }
-
-                Thread.Sleep((int)Math.Min(backoffMs, remaining));
-                if (Environment.TickCount64 >= deadline)
-                {
-                    throw;
-                }
-
-                backoffMs = Math.Min(backoffMs * 2, 50);
             }
         }
+    }
+
+    /// <summary>
+    /// Roll back the open transaction, waiting out a busy failure for up to the busy timeout. Unlike the
+    /// statements inside a transaction this is sound to retry, since a rollback reads nothing from the snapshot
+    /// that may have gone stale. It is worth retrying because a checkpoint fails a ROLLBACK as readily as any
+    /// other statement, and a connection left in its transaction keeps whatever locks it took.
+    /// </summary>
+    internal void Rollback()
+    {
+        var deadline = Environment.TickCount64 + Math.Max(0, _busyTimeoutMs);
+        var backoffMs = 1;
+        while (true)
+        {
+            try
+            {
+                Execute("ROLLBACK");
+                return;
+            }
+            catch (TursoException ex) when ((ex.IsBusy || ex.IsBusySnapshot) && InTransaction)
+            {
+                if (!WaitForRetry(deadline, ref backoffMs))
+                {
+                    throw;
+                }
+            }
+        }
+    }
+
+    /// <summary>Back off before another attempt, or false when the deadline leaves no time for one. Same rules as
+    /// <see cref="TursoSyncDatabase.Connect"/>: the busy timeout bounds the whole operation, so never sleep past the
+    /// deadline and never attempt once it has passed.</summary>
+    private static bool WaitForRetry(long deadline, ref int backoffMs)
+    {
+        var remaining = deadline - Environment.TickCount64;
+        if (remaining <= 0)
+        {
+            return false;
+        }
+
+        Thread.Sleep((int)Math.Min(backoffMs, remaining));
+        if (Environment.TickCount64 >= deadline)
+        {
+            return false;
+        }
+
+        backoffMs = Math.Min(backoffMs * 2, 50);
+        return true;
     }
 
     private TursoRawStatement PrepareOnce(string sql)

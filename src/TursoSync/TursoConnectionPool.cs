@@ -76,7 +76,7 @@ internal static class TursoConnectionPool
     {
         // A connection that registered UDFs/collations or loaded extensions carries per-connection state
         // that must not leak to the next renter — drop it instead of pooling.
-        if (physical.NonPoolable || physical.Raw.HasExtensions || !physical.IsUsable())
+        if (physical.NonPoolable || physical.Raw.HasExtensions || !physical.TryEndTransaction() || !physical.IsUsable())
         {
             physical.Dispose();
             return;
@@ -164,6 +164,31 @@ internal sealed class TursoPhysicalConnection : IDisposable
             TursoSyncDatabaseCache.Release(key);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Roll back a transaction still open on this connection: true when none is left. A connection closed without
+    /// finishing its transaction would otherwise sit in the pool holding the write lock, with every writer on the
+    /// database waiting on a connection nobody is using. False means it could not be ended, and only disposing the
+    /// connection releases the lock.
+    /// </summary>
+    public bool TryEndTransaction()
+    {
+        if (!Raw.InTransaction)
+        {
+            return true;
+        }
+
+        try
+        {
+            Raw.Rollback();
+        }
+        catch (TursoException)
+        {
+            return false;
+        }
+
+        return !Raw.InTransaction;
     }
 
     /// <summary>Cheap health probe: a trivial query must succeed for the connection to be reused.</summary>
