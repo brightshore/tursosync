@@ -121,6 +121,22 @@ infinite HTTP timeout can therefore postpone an event indefinitely. The callback
 is shared by all connections using the same replica and captured per request:
 coordinate temporary changes with other database users if logging only one push.
 
+## Transactions
+
+`BeginTransaction()` and `BeginTransactionAsync()` take the write lock at the start (`BEGIN IMMEDIATE`), matching
+Microsoft.Data.Sqlite. A contended BEGIN waits for up to the busy timeout, then fails with `IsBusy`. Nothing can
+commit past the transaction, so a read followed by a write can't fail with a stale snapshot (`IsBusySnapshot`).
+`BeginTransactionAsync()` runs synchronously, so a contended BEGIN blocks the calling thread for up to the busy
+timeout. Avoid calling it on a UI thread.
+
+While one is open, other writers wait for it. On a synced database so do pulls and cold opens, which fail busy if
+it outlasts the busy timeout, and `Checkpoint()` fails busy at once. Keep transactions short, and don't hold one
+across a network call.
+
+For a transaction that only reads, use `BeginTransaction(deferred: true)`. `IsolationLevel.ReadUncommitted` is
+also deferred. A deferred transaction takes no write lock until its first write, and that write fails with
+`IsBusySnapshot` if another writer has committed since its first read.
+
 ## Engine fixes and large backlogs
 
 The native build applies the maintained patches under `patches/` to the exact

@@ -136,6 +136,9 @@ public sealed class TursoConnection : DbConnection
 
     internal int DefaultTimeout => _options.DefaultTimeout;
 
+    /// <summary>True if a transaction is open on this connection; false when it is closed.</summary>
+    internal bool InTransaction => _physical?.Raw.InTransaction ?? false;
+
     internal bool ReadUncommitted
     {
         get => _readUncommitted;
@@ -357,16 +360,42 @@ public sealed class TursoConnection : DbConnection
     /// <inheritdoc/>
     protected override DbCommand CreateDbCommand() => new TursoCommand(this);
 
-    /// <inheritdoc/>
-    protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel)
+    /// <summary>
+    /// Begin a transaction holding the write lock from the start (<c>BEGIN IMMEDIATE</c>), as
+    /// Microsoft.Data.Sqlite's <c>BeginTransaction()</c> does.
+    ///
+    /// <para>A deferred transaction that reads before its first write holds a snapshot, and any writer committing
+    /// before that write makes the snapshot stale: the write fails at once with
+    /// <see cref="TursoException.IsBusySnapshot"/>, which no busy timeout can help. Holding the lock from BEGIN
+    /// means the wait happens there instead, under the busy timeout, and nothing can invalidate the read. It also
+    /// means other writers wait for this transaction, so a transaction that only reads should ask for
+    /// <see cref="BeginTransaction(bool)"/> with <c>deferred: true</c>.</para>
+    /// </summary>
+    public new TursoTransaction BeginTransaction() => BeginTransaction(IsolationLevel.Unspecified);
+
+    /// <summary>Begin a transaction at <paramref name="isolationLevel"/>: deferred for
+    /// <see cref="IsolationLevel.ReadUncommitted"/>, otherwise holding the write lock (<see cref="BeginTransaction()"/>).</summary>
+    public new TursoTransaction BeginTransaction(IsolationLevel isolationLevel) =>
+        BeginTransaction(isolationLevel, deferred: isolationLevel == IsolationLevel.ReadUncommitted);
+
+    /// <summary>Begin a transaction, choosing whether it is <paramref name="deferred"/> (takes its locks as its
+    /// statements need them) or holds the write lock from the start (<see cref="BeginTransaction()"/>).</summary>
+    public TursoTransaction BeginTransaction(bool deferred) => BeginTransaction(IsolationLevel.Unspecified, deferred);
+
+    /// <summary>Begin a transaction at <paramref name="isolationLevel"/>, choosing whether it is
+    /// <paramref name="deferred"/> (<see cref="BeginTransaction(bool)"/>).</summary>
+    public TursoTransaction BeginTransaction(IsolationLevel isolationLevel, bool deferred)
     {
         if (_physical is null)
         {
             throw new InvalidOperationException("Turso database is closed.");
         }
 
-        return new TursoTransaction(this, isolationLevel);
+        return new TursoTransaction(this, isolationLevel, deferred);
     }
+
+    /// <inheritdoc/>
+    protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel) => BeginTransaction(isolationLevel);
 
     /// <inheritdoc/>
     protected override void Dispose(bool disposing)
@@ -381,22 +410,24 @@ public sealed class TursoConnection : DbConnection
     }
 }
 
-/// <summary>A transaction over a <see cref="TursoConnection"/> (SQLite-style BEGIN/COMMIT/ROLLBACK).</summary>
+/// <summary>A transaction over a <see cref="TursoConnection"/> (SQLite-style BEGIN/COMMIT/ROLLBACK). Holds the write
+/// lock from the start unless deferred (<see cref="TursoConnection.BeginTransaction()"/>).</summary>
 public sealed class TursoTransaction : DbTransaction
 {
     private readonly TursoConnection _connection;
     private bool _completed;
 
-    internal TursoTransaction(TursoConnection connection, IsolationLevel isolationLevel)
+    internal TursoTransaction(TursoConnection connection, IsolationLevel isolationLevel, bool deferred)
     {
         _connection = connection;
         IsolationLevel = NormalizeIsolationLevel(isolationLevel);
+
+        // First, because taking the write lock can fail busy, and that must leave the connection as it was.
+        connection.ExecuteNonQuery(deferred ? "BEGIN" : "BEGIN IMMEDIATE");
         if (IsolationLevel == IsolationLevel.ReadUncommitted)
         {
             connection.ReadUncommitted = true;
         }
-
-        connection.ExecuteNonQuery("BEGIN");
     }
 
     /// <inheritdoc/>
@@ -421,12 +452,17 @@ public sealed class TursoTransaction : DbTransaction
         ThrowIfCompleted();
         try
         {
-            _connection.ExecuteNonQuery("ROLLBACK");
+            _connection.Raw.Rollback();
         }
-        finally
+        catch when (!_connection.InTransaction)
         {
             Complete();
+            throw;
         }
+
+        // A rollback that failed leaves the transaction open, holding its locks, so it isn't complete: the caller
+        // can try again.
+        Complete();
     }
 
     /// <inheritdoc/>
@@ -434,7 +470,18 @@ public sealed class TursoTransaction : DbTransaction
     {
         if (disposing && !_completed)
         {
-            Rollback();
+            try
+            {
+                Rollback();
+            }
+            catch (TursoException)
+            {
+                // Nothing can retry after a dispose, and throwing here would replace whatever exception is unwinding
+                // through the using block. Closing ends the transaction: it retries the rollback, and disposes the
+                // physical connection if that fails too, which releases the locks and discards the writes.
+                _connection.Close();
+                Complete();
+            }
         }
 
         base.Dispose(disposing);

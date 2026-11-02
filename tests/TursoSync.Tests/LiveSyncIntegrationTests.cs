@@ -538,6 +538,85 @@ public class LiveSyncIntegrationTests
     /// rather than merely beside one.
     /// </summary>
     [TestMethod]
+    public void LiveSync_A_Default_Transaction_Records_And_Pushes_As_One_Transaction()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (id INTEGER PRIMARY KEY)");
+
+        var dbPath = TempDb();
+        try
+        {
+            using var conn = new TursoConnection($"Data Source={dbPath};Remote Url={server.BaseUrl};Bootstrap=true");
+            conn.Open();
+
+            using (var tx = conn.BeginTransaction())
+            {
+                conn.ExecuteNonQuery("INSERT INTO t VALUES (1)");
+                conn.ExecuteNonQuery("INSERT INTO t VALUES (2)");
+                tx.Commit();
+            }
+
+            using (var cdc = conn.CreateCommand())
+            {
+                cdc.CommandText = "SELECT max(n) FROM (SELECT count(*) AS n FROM turso_cdc " +
+                                  "WHERE table_name='t' AND change_type<>2 GROUP BY change_txn_id)";
+                cdc.ExecuteScalar().Should().Be(2L, "both writes are recorded under one transaction");
+            }
+
+            conn.SyncDatabase!.Push();
+            RemoteValues(server, "SELECT id FROM t ORDER BY id").Should().Equal("1", "2");
+        }
+        finally
+        {
+            TursoConnection.ClearPool();
+            Cleanup(dbPath);
+        }
+    }
+
+    [TestMethod]
+    public void LiveSync_A_Pull_Waits_For_A_Default_Transaction_Which_Keeps_Working_Meanwhile()
+    {
+        using var server = StartServerOrSkip();
+        server.ExecRemote("CREATE TABLE t (id INTEGER PRIMARY KEY)", "INSERT INTO t VALUES (1)");
+
+        var dbPath = TempDb();
+        try
+        {
+            using var conn = new TursoConnection($"Data Source={dbPath};Remote Url={server.BaseUrl};Bootstrap=true");
+            conn.Open();
+            var db = conn.SyncDatabase!;
+            server.ExecRemote("INSERT INTO t VALUES (2)");
+
+            using var tx = conn.BeginTransaction();
+            using (var read = conn.CreateCommand())
+            {
+                read.CommandText = "SELECT count(*) FROM t";
+                read.ExecuteScalar().Should().Be(1L);
+            }
+
+            var pull = Task.Run(db.Pull);
+            pull.Wait(TimeSpan.FromMilliseconds(1000)).Should().BeFalse("the pull needs the write lock this transaction holds");
+
+            // The pull must wait without holding anything the transaction needs, or the two deadlock until it times out.
+            var sw = Stopwatch.StartNew();
+            conn.ExecuteNonQuery("INSERT INTO t VALUES (10)");
+            tx.Commit();
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1));
+
+            pull.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+            pull.Result.Should().BeTrue();
+
+            db.Push();
+            RemoteValues(server, "SELECT id FROM t ORDER BY id").Should().Equal("1", "2", "10");
+        }
+        finally
+        {
+            TursoConnection.ClearPool();
+            Cleanup(dbPath);
+        }
+    }
+
+    [TestMethod]
     public async Task LiveSync_Reads_During_A_Pull_Apply_Wait_Rather_Than_Fail_Busy()
     {
         using var server = StartServerOrSkip();
