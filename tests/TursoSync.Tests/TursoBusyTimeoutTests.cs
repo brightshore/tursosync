@@ -288,6 +288,10 @@ public class TursoBusyTimeoutTests
                         conn.Execute($"INSERT INTO t (payload) VALUES ('{payload}')");
                         stage = "commit";
 
+                        // With the lock held and the flag set, so that checkpoints land here: on Windows most of a
+                        // transaction's time is otherwise inside COMMIT, where the flag has to be clear.
+                        Thread.Sleep(1);
+
                         // Cleared before COMMIT, not after: the flag only ever says the lock is certainly held.
                         Volatile.Write(ref holdingWriteLock, 0);
                         conn.Execute("COMMIT");
