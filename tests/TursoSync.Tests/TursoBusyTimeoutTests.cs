@@ -125,12 +125,13 @@ public class TursoBusyTimeoutTests
     }
 
     [TestMethod]
-    public void A_Stale_Snapshot_Still_Fails_At_Once_After_A_Checkpoint()
+    public void A_Stale_Snapshot_Queued_Behind_A_Checkpoint_Still_Fails_At_Once()
     {
         SkipUnlessNative();
 
-        // Waiting for a checkpoint must not turn into the spin in TursoRawConnection's note: a snapshot that has gone
-        // stale fails the moment the transaction tries to write, with the error that says to restart it.
+        // Waiting for a checkpoint must not turn into the spin in TursoRawConnection's note. The stale write queues on
+        // the gate a checkpoint holds, and once let through it fails with the error that says to restart, without
+        // waiting on. Holding the gate directly is what makes the write start while a "checkpoint" is under way.
         var dbPath = TempDb();
         try
         {
@@ -142,12 +143,27 @@ public class TursoBusyTimeoutTests
             conn.Execute("BEGIN");
             conn.QueryScalar("SELECT count(*) FROM t");
             other.Execute("INSERT INTO t VALUES (1)");
-            try { db.Checkpoint(); }
-            catch (TursoException ex) when (ex.IsBusy) { /* the open read transaction may refuse it */ }
 
-            var sw = Stopwatch.StartNew();
-            var write = () => conn.Execute("INSERT INTO t VALUES (2)");
-            write.Should().Throw<TursoException>().Which.IsBusySnapshot.Should().BeTrue();
+            Task<TursoException> write;
+            var sw = new Stopwatch();
+            db.ApplyGate.EnterWriteLock();
+            try
+            {
+                write = Task.Run(() =>
+                {
+                    var stale = () => conn.Execute("INSERT INTO t VALUES (2)");
+                    return stale.Should().Throw<TursoException>().Which;
+                });
+                SpinWait.SpinUntil(() => db.ApplyGate.WaitingReadCount > 0, TimeSpan.FromSeconds(5))
+                    .Should().BeTrue("the write queues behind the checkpoint");
+                sw.Start();
+            }
+            finally
+            {
+                db.ApplyGate.ExitWriteLock();
+            }
+
+            write.Result.IsBusySnapshot.Should().BeTrue();
             sw.ElapsedMilliseconds.Should().BeLessThan(LongTimeoutMs / 2, "a stale snapshot is not waited on");
             conn.Execute("ROLLBACK");
         }
