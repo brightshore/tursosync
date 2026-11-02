@@ -236,7 +236,16 @@ public class TursoBusyTimeoutTests
             var payload = new string('p', 2048);
             var committed = 0;
             var checkpointAttempts = 0;
+            var holdingWriteLock = 0;
+            var checkpointsAcrossATransaction = 0;
             var failures = new ConcurrentQueue<string>();
+            db.CheckpointStarting = () =>
+            {
+                if (Volatile.Read(ref holdingWriteLock) == 1)
+                {
+                    Interlocked.Increment(ref checkpointsAcrossATransaction);
+                }
+            };
             using var done = new CancellationTokenSource(TimeSpan.FromSeconds(MeasureSeconds));
             var ct = done.Token;
 
@@ -272,6 +281,7 @@ public class TursoBusyTimeoutTests
                     {
                         conn.Execute("BEGIN IMMEDIATE");
                         open = true;
+                        Volatile.Write(ref holdingWriteLock, 1);
                         stage = "read";
                         conn.QueryScalar("SELECT count(*) FROM t");
                         stage = "write";
@@ -279,6 +289,7 @@ public class TursoBusyTimeoutTests
                         stage = "commit";
                         conn.Execute("COMMIT");
                         open = false;
+                        Volatile.Write(ref holdingWriteLock, 0);
                         Interlocked.Increment(ref committed);
                     }
                     catch (TursoException ex) when (ex.IsBusy || ex.IsBusySnapshot)
@@ -288,6 +299,8 @@ public class TursoBusyTimeoutTests
                         {
                             RollBack(conn);
                         }
+
+                        Volatile.Write(ref holdingWriteLock, 0);
                     }
                 }
             });
@@ -296,10 +309,11 @@ public class TursoBusyTimeoutTests
 
             var byKind = failures.GroupBy(f => f).Select(g => $"{g.Count()} x {g.Key}").ToArray();
             Console.WriteLine($"[busy] write-lock transactions: committed={committed} checkpoint-attempts={checkpointAttempts} " +
+                $"across-a-transaction={checkpointsAcrossATransaction} " +
                 $"failed={failures.Count} {string.Join("; ", byKind)}");
 
             committed.Should().BeGreaterThan(0);
-            checkpointAttempts.Should().BeGreaterThan(1, "the transactions have to run alongside checkpoints");
+            checkpointsAcrossATransaction.Should().BeGreaterThan(0, "a checkpoint has to start while a transaction holds the write lock");
             byKind.Should().BeEmpty("a checkpoint must not fail a statement in a transaction holding the write lock");
         }
         finally
