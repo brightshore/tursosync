@@ -44,6 +44,13 @@ public sealed partial class TursoSyncDatabase : IDisposable
     /// <summary>Runs holding the apply gate exclusively, just before a pull applies its changes. A test seam: holding
     /// it open is how a test makes a statement start while the apply is under way.</summary>
     internal Action? ApplyStarting { get; set; }
+
+    /// <summary>Test signal before an operation services its queued I/O.</summary>
+    internal Action? IoQueueStarting { get; set; }
+
+    /// <summary>Test signal when a local statement needs its I/O pump.</summary>
+    internal Action? LocalIoStarting { get; set; }
+
     /// <summary>
     /// Optional callback for one safe diagnostic per completed HTTP request (including failed requests).
     /// Null by default. Runs synchronously under the database's operation lock; keep it fast and do not
@@ -363,23 +370,34 @@ public sealed partial class TursoSyncDatabase : IDisposable
     }
 
     /// <summary>
-    /// Process at most one queued IO item, then step engine callbacks. Called once per statement-step
-    /// iteration by the ADO.NET layer so queries on a synced DB also advance sync IO (Go's <c>extra</c>).
+    /// Process at most one queued IO item when no other thread owns an engine operation, then step engine
+    /// callbacks. Local statements must not take a push or pull's HTTP request and wait on its network I/O.
     /// </summary>
     public void ProcessOneIo()
     {
         ThrowIfDisposed();
-        var status = TursoNative.SyncIoTakeItem(_db, out var item, out var errorPtr);
-        Check(status, errorPtr, "io_take_item");
-        if (item != IntPtr.Zero)
+        LocalIoStarting?.Invoke();
+        if (Monitor.TryEnter(_gate))
         {
             try
             {
-                HandleIoItem(item);
+                var status = TursoNative.SyncIoTakeItem(_db, out var item, out var errorPtr);
+                Check(status, errorPtr, "io_take_item");
+                if (item != IntPtr.Zero)
+                {
+                    try
+                    {
+                        HandleIoItem(item);
+                    }
+                    finally
+                    {
+                        TursoNative.SyncIoItemDeinit(item);
+                    }
+                }
             }
             finally
             {
-                TursoNative.SyncIoItemDeinit(item);
+                Monitor.Exit(_gate);
             }
         }
 
@@ -475,6 +493,7 @@ public sealed partial class TursoSyncDatabase : IDisposable
 
     private void ProcessIoQueue()
     {
+        IoQueueStarting?.Invoke();
         while (true)
         {
             var status = TursoNative.SyncIoTakeItem(_db, out var item, out var errorPtr);

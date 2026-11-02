@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Threading.Channels;
 using Turso.Sync;
 
 namespace TursoSync.Tests;
@@ -15,6 +16,92 @@ public class TursoNetworkStallTests
     /// <summary>A bound on how long a test waits for something before calling it stuck, so a regression fails instead
     /// of hanging the run. Never a verdict on how fast anything was.</summary>
     private static readonly TimeSpan StuckAfter = TimeSpan.FromSeconds(20);
+
+    [TestMethod]
+    [DataRow(false, DisplayName = "local write during push")]
+    [DataRow(true, DisplayName = "local write during pull")]
+    public async Task A_Local_Write_Does_Not_Take_The_Sync_Operations_Queued_Http_Request(bool pull)
+    {
+        using var remote = HungRemote.Start();
+        using var fx = Fixture.Create(remote.BaseUrl);
+        using var conn = TursoRawConnection.Open(fx.Db);
+        using var holder = TursoRawConnection.Open(fx.Db);
+        conn.Execute("CREATE TABLE t (x INTEGER PRIMARY KEY)");
+        conn.Execute("INSERT INTO t VALUES (1)");
+
+        var pauses = Channel.CreateUnbounded<TaskCompletionSource>();
+        fx.Db.IoQueueStarting = () =>
+        {
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            pauses.Writer.TryWrite(release).Should().BeTrue();
+            release.Task.GetAwaiter().GetResult();
+        };
+        var sync = Task.Factory.StartNew(() =>
+        {
+            if (pull) fx.Db.Pull();
+            else fx.Db.Push();
+        }, TaskCreationOptions.LongRunning);
+        Task<object?>? work = null;
+        TaskCompletionSource? paused = null;
+        var written = 1;
+        try
+        {
+            while (!remote.FirstRequest.IsCompleted)
+            {
+                var nextPause = pauses.Reader.ReadAsync().AsTask();
+                var next = await Task.WhenAny(nextPause, remote.FirstRequest, sync).WaitAsync(StuckAfter);
+                next.Should().NotBeSameAs(sync, "the operation should reach the waiting HTTP remote");
+                if (next == remote.FirstRequest) break;
+                paused = await nextPause;
+
+                work = Task.Factory.StartNew(() =>
+                {
+                    // Force a busy-step I/O turn even when disk I/O completes synchronously.
+                    holder.Execute("BEGIN IMMEDIATE");
+                    var released = false;
+                    fx.Db.LocalIoStarting = () =>
+                    {
+                        fx.Db.LocalIoStarting = null;
+                        // Remove the local lock before the statement services the shared I/O queue.
+                        holder.Execute("ROLLBACK");
+                        released = true;
+                    };
+                    try
+                    {
+                        conn.Execute("INSERT INTO t DEFAULT VALUES");
+                        released.Should().BeTrue("the contended write must exercise the real statement I/O pump");
+                        return conn.QueryScalar("SELECT COUNT(*) FROM t");
+                    }
+                    finally
+                    {
+                        fx.Db.LocalIoStarting = null;
+                        if (!released) holder.Execute("ROLLBACK");
+                    }
+                }, TaskCreationOptions.LongRunning);
+
+                var first = await Task.WhenAny(work, remote.FirstRequest).WaitAsync(StuckAfter);
+                first.Should().BeSameAs(work,
+                    "the sync operation is paused before servicing its HTTP request; a local statement must complete without taking that request and waiting on the network");
+                (await work).Should().Be((long)++written);
+                remote.FirstRequest.IsCompleted.Should().BeFalse("only the local statement has been allowed to pump I/O");
+                paused.TrySetResult();
+                paused = null;
+            }
+
+            written.Should().BeGreaterThan(1);
+            work!.IsCompletedSuccessfully.Should().BeTrue();
+            sync.IsCompleted.Should().BeFalse("the sync thread owns the request still waiting on the remote");
+        }
+        finally
+        {
+            fx.Db.IoQueueStarting = null;
+            remote.Dispose();
+            paused?.TrySetResult();
+            while (pauses.Reader.TryRead(out var remaining)) remaining.TrySetResult();
+            await sync.ContinueWith(_ => { }).WaitAsync(StuckAfter);
+            if (work is not null) await work.ContinueWith(_ => { }).WaitAsync(StuckAfter);
+        }
+    }
 
     /// <summary>What an app can rely on today: a connection opened before the push reads and writes while the push
     /// waits on the network. A push holds no database lock while it waits, only the engine.</summary>
