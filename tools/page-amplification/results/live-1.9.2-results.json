@@ -1,0 +1,100 @@
+{
+  "sdk_version": "1.9.2",
+  "observation_utc": "2026-11-01T21:52:14.287132+00:00",
+  "user_confirmed_active_lane": true,
+  "operations": [
+    {
+      "ended_utc": "2026-11-01T21:45:11.892000+00:00",
+      "operation": "pull",
+      "seconds": 0.6,
+      "wal_before_bytes": 100985352,
+      "wal_after_bytes": 100985352,
+      "cdc_before_push": null,
+      "failed": false,
+      "nothing_to_apply": true,
+      "http_request_count": 1,
+      "http_statuses": [
+        "200"
+      ],
+      "response_wire_bytes": 94
+    },
+    {
+      "ended_utc": "2026-11-01T21:45:12.237000+00:00",
+      "operation": "checkpoint",
+      "seconds": 0.3,
+      "wal_before_bytes": 100985352,
+      "wal_after_bytes": 0,
+      "cdc_before_push": null,
+      "failed": false,
+      "nothing_to_apply": false,
+      "http_request_count": 0,
+      "http_statuses": [],
+      "response_wire_bytes": 0
+    },
+    {
+      "ended_utc": "2026-11-01T21:46:16.960000+00:00",
+      "operation": "push",
+      "seconds": 44.7,
+      "wal_before_bytes": 1709832,
+      "wal_after_bytes": 5454912,
+      "cdc_before_push": 60567,
+      "failed": false,
+      "nothing_to_apply": false,
+      "http_request_count": 28,
+      "http_statuses": [
+        "200"
+      ],
+      "response_wire_bytes": 285072
+    },
+    {
+      "ended_utc": "2026-11-01T21:47:30.463000+00:00",
+      "operation": "pull",
+      "seconds": 17.8,
+      "wal_before_bytes": 7416032,
+      "wal_after_bytes": 114231152,
+      "cdc_before_push": null,
+      "failed": false,
+      "nothing_to_apply": false,
+      "http_request_count": 1,
+      "http_statuses": [
+        "200"
+      ],
+      "response_wire_bytes": 85271581
+    },
+    {
+      "ended_utc": "2026-11-01T21:49:34.576000+00:00",
+      "operation": "pull",
+      "seconds": 1.9,
+      "wal_before_bytes": 118577752,
+      "wal_after_bytes": 121239272,
+      "cdc_before_push": null,
+      "failed": false,
+      "nothing_to_apply": false,
+      "http_request_count": 1,
+      "http_statuses": [
+        "200"
+      ],
+      "response_wire_bytes": 362055
+    }
+  ],
+  "latest_successful_push_unix_time": 1793569932,
+  "latest_pull_unix_time": 1793569912,
+  "first_catchup_raw_pull_bytes": 149551880,
+  "first_catchup_raw_pull_frames": 36299,
+  "first_catchup_raw_pull_note": "Measured completed turso.db-changes before the following pull overwrote it.",
+  "incremental_wal_image_analysis": {
+    "status": "valid_baseline_time_guard_passed",
+    "database_modified_utc": "2026-11-01T21:49:34.108143+00:00",
+    "wal_before_bytes": 118577752,
+    "wal_after_bytes": 121239272,
+    "appended_frames": 646,
+    "distinct_pages_written": 544,
+    "counts": {
+      "different_from_preceding_image": 639,
+      "commit_frames": 2,
+      "identical_to_preceding_image": 7
+    },
+    "scope": "All WAL writes in the logged operation, including rollback, remote apply, and local replay; not a count of business changes or remote-only writes."
+  },
+  "interpretation_limits": "One live workload, not a controlled before/after benchmark. WAL deltas include rollback, remote page application, and local replay. Wire bytes count compressed response streams. Cloud page-selection behavior itself is unchanged."
+}

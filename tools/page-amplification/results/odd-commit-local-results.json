@@ -1,0 +1,123 @@
+{
+  "fixture_rows": 256,
+  "payload_bytes_per_row": 4096,
+  "steps": [
+    {
+      "wire_bytes": 16426,
+      "protocol": 1,
+      "database_pages": 291,
+      "label": "age_0s",
+      "commits_since_baseline": 1,
+      "elapsed_seconds": 0.011,
+      "returned_pages": 4,
+      "changed_pages": 4,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        0,
+        146,
+        147,
+        290
+      ],
+      "returned_page_ids": [
+        0,
+        146,
+        147,
+        290
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 16426,
+      "protocol": 1,
+      "database_pages": 291,
+      "label": "commit_1",
+      "commits_since_baseline": 1,
+      "elapsed_seconds": 0.033,
+      "returned_pages": 4,
+      "changed_pages": 4,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        0,
+        146,
+        147,
+        290
+      ],
+      "returned_page_ids": [
+        0,
+        146,
+        147,
+        290
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 16427,
+      "protocol": 1,
+      "database_pages": 291,
+      "label": "commit_257",
+      "commits_since_baseline": 257,
+      "elapsed_seconds": 0.129,
+      "returned_pages": 4,
+      "changed_pages": 4,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        0,
+        146,
+        147,
+        290
+      ],
+      "returned_page_ids": [
+        0,
+        146,
+        147,
+        290
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    },
+    {
+      "wire_bytes": 16427,
+      "protocol": 1,
+      "database_pages": 291,
+      "label": "commit_513",
+      "commits_since_baseline": 513,
+      "elapsed_seconds": 0.226,
+      "returned_pages": 4,
+      "changed_pages": 4,
+      "unchanged_pages": 0,
+      "changed_page_ids": [
+        0,
+        146,
+        147,
+        290
+      ],
+      "returned_page_ids": [
+        0,
+        146,
+        147,
+        290
+      ],
+      "complete_32_page_groups": 0,
+      "verified_marker": 101
+    }
+  ],
+  "mode": "local",
+  "completed": true,
+  "initial": {
+    "wire_bytes": 1190043,
+    "protocol": 1,
+    "database_pages": 290
+  },
+  "sqlite_version": "3.50.4",
+  "journal_mode": "wal",
+  "recent_revision_control": {
+    "wire_bytes": 16427,
+    "protocol": 1,
+    "database_pages": 291,
+    "returned_pages": 4,
+    "changed_pages": 4,
+    "unchanged_pages": 0
+  }
+}
