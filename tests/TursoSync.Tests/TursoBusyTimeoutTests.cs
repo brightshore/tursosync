@@ -130,8 +130,8 @@ public class TursoBusyTimeoutTests
         SkipUnlessNative();
 
         // Waiting for a checkpoint must not turn into the spin in TursoRawConnection's note. The stale write queues on
-        // the gate a checkpoint holds, and once let through it fails with the error that says to restart, without
-        // waiting on. Holding the gate directly is what makes the write start while a "checkpoint" is under way.
+        // the gate a real checkpoint holds, and once let through it fails with the error that says to restart, without
+        // waiting on. If a checkpoint stopped taking the gate, the write would never queue.
         var dbPath = TempDb();
         try
         {
@@ -144,26 +144,37 @@ public class TursoBusyTimeoutTests
             conn.QueryScalar("SELECT count(*) FROM t");
             other.Execute("INSERT INTO t VALUES (1)");
 
-            Task<TursoException> write;
+            Task<TursoException?>? write = null;
+            var queued = false;
             var sw = new Stopwatch();
-            db.ApplyGate.EnterWriteLock();
-            try
+            db.CheckpointStarting = () =>
             {
                 write = Task.Run(() =>
                 {
-                    var stale = () => conn.Execute("INSERT INTO t VALUES (2)");
-                    return stale.Should().Throw<TursoException>().Which;
+                    try
+                    {
+                        conn.Execute("INSERT INTO t VALUES (2)");
+                        return null;
+                    }
+                    catch (TursoException ex)
+                    {
+                        return ex;
+                    }
                 });
-                SpinWait.SpinUntil(() => db.ApplyGate.WaitingReadCount > 0, TimeSpan.FromSeconds(5))
-                    .Should().BeTrue("the write queues behind the checkpoint");
+                queued = SpinWait.SpinUntil(() => db.ApplyGate.WaitingReadCount > 0, TimeSpan.FromSeconds(5));
                 sw.Start();
-            }
-            finally
-            {
-                db.ApplyGate.ExitWriteLock();
-            }
+            };
 
-            write.Result.IsBusySnapshot.Should().BeTrue();
+            try { db.Checkpoint(); }
+            catch (TursoException ex) when (ex.IsBusy) { /* the open read transaction may refuse it */ }
+
+            // Before any assertion: the connection and database are disposed on the way out, under a running write.
+            write!.Wait(TimeSpan.FromSeconds(30)).Should().BeTrue("the write finishes once the checkpoint lets it through");
+            sw.Stop();
+
+            queued.Should().BeTrue("the write queues behind the checkpoint");
+            write.Result.Should().NotBeNull("a stale write fails");
+            write.Result!.IsBusySnapshot.Should().BeTrue();
             sw.ElapsedMilliseconds.Should().BeLessThan(LongTimeoutMs / 2, "a stale snapshot is not waited on");
             conn.Execute("ROLLBACK");
         }

@@ -58,6 +58,11 @@ public sealed partial class TursoSyncDatabase : IDisposable
     /// <summary>Test signal when a local statement needs its I/O pump.</summary>
     internal Action? LocalIoStarting { get; set; }
 
+    /// <summary>Runs just before a checkpoint starts, holding the apply gate exclusively unless
+    /// <see cref="CheckpointTakesApplyGate"/> is off. A test seam: holding it open is how a test makes a statement start
+    /// while the checkpoint is under way.</summary>
+    internal Action? CheckpointStarting { get; set; }
+
     /// <summary>A test seam: false leaves the apply gate alone during <see cref="Checkpoint"/>, the one way left to put a
     /// real engine busy in front of <see cref="TursoRawConnection.Prepare"/> and test how it treats one.</summary>
     internal bool CheckpointTakesApplyGate { get; set; } = true;
@@ -350,6 +355,7 @@ public sealed partial class TursoSyncDatabase : IDisposable
 
             try
             {
+                CheckpointStarting?.Invoke();
                 DriveAndDeinit(Begin(TursoNative.SyncDatabaseCheckpoint, "checkpoint"), "checkpoint");
             }
             finally
