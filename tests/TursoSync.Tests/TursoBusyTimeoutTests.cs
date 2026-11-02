@@ -175,10 +175,11 @@ public class TursoBusyTimeoutTests
             {
                 ran = true;
                 try { db.Checkpoint(); }
-                catch (TursoException ex) when (ex.IsBusy) { /* the statement calling it may refuse it */ }
                 catch (Exception ex) { thrown = ex; }
                 return 1L;
             });
+            conn.Execute("CREATE TABLE t (x INTEGER PRIMARY KEY)");
+            conn.Execute("INSERT INTO t VALUES (1)");
 
             conn.QueryScalar("SELECT checkpoint_now()").Should().Be(1L);
 
