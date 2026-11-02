@@ -321,6 +321,7 @@ public class TursoTransactionLockingTests
         other.Open();
         conn.ExecuteNonQuery("CREATE TABLE t (id INTEGER PRIMARY KEY, payload TEXT)");
         var db = conn.SyncDatabase!;
+        db.CheckpointTakesApplyGate = Environment.GetEnvironmentVariable("AB_GATE") != "off";
 
         using var done = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         var ct = done.Token;
@@ -385,6 +386,7 @@ public class TursoTransactionLockingTests
         });
 
         Task.WaitAll(writer, checkpointer, worker);
+        Console.WriteLine($"[ab] deferred={deferred} committed={committed} stale={stale} stranded={stranded}");
         return new Contention(committed, stale, stranded);
     }
 }
