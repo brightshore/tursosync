@@ -1,0 +1,29 @@
+tests/TursoSync.Tests/TursoNetworkStallTests.cs
+  s_39a534ffa60717::t_c47c0860afa0a4 20,23-27,29-31,33-34,38-44,47-48,50,90,94-96,98,101-105
+  s_39a534ffa60717::t_dd8c0146403bd9 21-22,59,65
+  s_39a534ffa60717::t_3ab12a636c15a8 3,32,35-37,45-46,49,51-58,80-89,91-93,97,99-100
+  s_39a534ffa60717::t_9a97d0ebe7c8b1 28,60-64,66-79
+.changeset/fuzzy-lions-jump.md
+  s_39a534ffa60717::t_e12393bde8b8d0 1-6
+src/TursoSync/TursoSyncDatabase.cs
+  s_39a534ffa60717::t_831a857d0f6fcc 373-374,380,384-396,400
+  s_39a534ffa60717::t_9a97d0ebe7c8b1 50-52,379
+  s_39a534ffa60717::t_c47c0860afa0a4 47-49,496
+  s_39a534ffa60717::t_60850549ab1d56 53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "dfb844b9408a859e8f7030894cbb516062d8a819",
+  "prompts": {},
+  "sessions": {
+    "s_39a534ffa60717": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19231-69fb-79d1-8545-fbf1d4a89679",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "John Campion Jr <john@brightshore.io>"
+    }
+  }
+}
