@@ -173,9 +173,10 @@ public sealed class TursoRawConnection : IDisposable
                 Execute("ROLLBACK");
                 return;
             }
-            catch (TursoException ex) when ((ex.IsBusy || ex.IsBusySnapshot) && InTransaction)
+            catch (TursoException ex) when (ex.IsBusy || ex.IsBusySnapshot)
             {
-                if (!WaitForRetry(deadline, ref backoffMs))
+                // In the body, not the filter, which would run before the failed statement is disposed.
+                if (!InTransaction || !WaitForRetry(deadline, ref backoffMs))
                 {
                     throw;
                 }

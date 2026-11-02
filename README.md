@@ -133,6 +133,12 @@ While one is open, other writers wait for it. On a synced database so do pulls a
 it outlasts the busy timeout, and `Checkpoint()` fails busy at once. Keep transactions short, and don't hold one
 across a network call.
 
+If a failed BEGIN leaves the connection in a transaction and that can't be rolled back either, BEGIN closes the
+connection before rethrowing `IsBusy`, because closing is what releases the write lock. Disposing a transaction whose
+rollback fails does the same. A retry then has to reopen the connection first, or it fails with
+`InvalidOperationException`, and the failing call can take up to about three busy timeouts: the wait for the lock, the
+rollback's retries, and one more when a pooled connection is returned.
+
 For a transaction that only reads, use `BeginTransaction(deferred: true)`. `IsolationLevel.ReadUncommitted` is
 also deferred. A deferred transaction takes no write lock until its first write, and that write fails with
 `IsBusySnapshot` if another writer has committed since its first read.

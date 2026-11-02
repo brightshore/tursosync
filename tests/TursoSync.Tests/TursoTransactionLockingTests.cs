@@ -264,11 +264,45 @@ public class TursoTransactionLockingTests
     }
 
     [TestMethod]
+    public void A_Begin_Refused_By_An_Open_Transaction_Leaves_That_Transaction_Alone()
+    {
+        using var conn = Open();
+        conn.ExecuteNonQuery("CREATE TABLE t (id INTEGER PRIMARY KEY)");
+
+        using var outer = conn.BeginTransaction();
+        conn.ExecuteNonQuery("INSERT INTO t (id) VALUES (1)");
+
+        var nested = () => conn.BeginTransaction();
+        nested.Should().Throw<TursoException>();
+
+        conn.InTransaction.Should().BeTrue();
+        outer.Commit();
+        Count(conn).Should().Be(1, "the refused BEGIN must not have rolled the open transaction back");
+    }
+
+    [TestMethod]
+    public void A_Dispose_With_No_Transaction_Left_Leaves_The_Connection_Open()
+    {
+        using var conn = Open();
+        conn.ExecuteNonQuery("CREATE TABLE t (id INTEGER PRIMARY KEY)");
+
+        var tx = conn.BeginTransaction();
+        conn.Close();
+        conn.Open();
+
+        // The transaction died with the old physical connection, so its ROLLBACK fails with nothing to release.
+        tx.Dispose();
+
+        conn.State.Should().Be(ConnectionState.Open);
+        Count(conn).Should().Be(0);
+    }
+
+    [TestMethod]
     public void A_Checkpoint_Never_Makes_A_Default_Transaction_Stale_Or_Strands_Its_Lock()
     {
         var immediate = Contend(deferred: false);
         immediate.Stale.Should().Be(0, "nothing can commit past a transaction holding the write lock");
-        immediate.Stranded.Should().Be(0, "disposing a failed transaction ends it, even during a checkpoint");
+        immediate.Stranded.Should().Be(0, "a failed BEGIN or a disposed transaction leaves none open, even during a checkpoint");
         immediate.Committed.Should().BeGreaterThan(0);
 
         // The same load has to be able to produce the failure, or the zero above proves nothing.
@@ -291,6 +325,18 @@ public class TursoTransactionLockingTests
         using var done = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         var ct = done.Token;
         var payload = new string('p', 1024);
+
+        // A busy machine, because a BEGIN IMMEDIATE only strands its connection in a transaction under CPU contention.
+        var spinners = Enumerable.Range(0, Environment.ProcessorCount * 2)
+            .Select(_ => new Thread(() =>
+            {
+                while (!ct.IsCancellationRequested)
+                {
+                    Thread.SpinWait(1000);
+                }
+            }) { IsBackground = true })
+            .ToList();
+        spinners.ForEach(spinner => spinner.Start());
 
         var writer = Task.Run(() =>
         {
