@@ -211,6 +211,59 @@ public class TursoTransactionLockingTests
     }
 
     [TestMethod]
+    public void A_Failed_Rollback_Leaves_The_Transaction_Open_To_Try_Again()
+    {
+        using var conn = Open();
+        using var other = Open();
+        conn.ExecuteNonQuery("CREATE TABLE t (id INTEGER PRIMARY KEY)");
+
+        using var tx = conn.BeginTransaction();
+        conn.ExecuteNonQuery("INSERT INTO t (id) VALUES (1)");
+
+        conn.Raw.RollbackStarting = () => throw new TursoException("rollback failed");
+        Action rollback = tx.Rollback;
+        rollback.Should().Throw<TursoException>();
+        conn.InTransaction.Should().BeTrue();
+
+        conn.Raw.RollbackStarting = null;
+        tx.Rollback();
+        conn.InTransaction.Should().BeFalse();
+        Count(other).Should().Be(0);
+    }
+
+    [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public void A_Dispose_Whose_Rollback_Fails_Keeps_The_Callers_Exception_And_Releases_The_Lock(bool pooling)
+    {
+        var cs = $"Data Source={Path.Combine(_dir, "store.db")};Pooling={pooling};Busy Timeout=100";
+        using var other = Open();
+        other.ExecuteNonQuery("CREATE TABLE t (id INTEGER PRIMARY KEY)");
+
+        using var conn = new TursoConnection(cs);
+        conn.Open();
+        Action body = () =>
+        {
+            using var tx = conn.BeginTransaction();
+            conn.ExecuteNonQuery("INSERT INTO t (id) VALUES (1)");
+            conn.Raw.RollbackStarting = () => throw new TursoException("rollback failed");
+            throw new FormatException("from the using block");
+        };
+
+        body.Should().Throw<FormatException>();
+        conn.State.Should().Be(ConnectionState.Closed);
+
+        other.ExecuteNonQuery("INSERT INTO t (id) VALUES (2)");
+        Count(other).Should().Be(1, "the unfinished transaction's write went with its connection");
+
+        // The connection that couldn't end its transaction was not pooled, so this one starts clean.
+        using var reused = new TursoConnection(cs);
+        reused.Open();
+        using var next = reused.BeginTransaction();
+        next.Commit();
+    }
+
+    [TestMethod]
     public void A_Checkpoint_Never_Makes_A_Default_Transaction_Stale_Or_Strands_Its_Lock()
     {
         var immediate = Contend(deferred: false);

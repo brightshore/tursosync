@@ -169,6 +169,7 @@ public sealed class TursoRawConnection : IDisposable
         {
             try
             {
+                RollbackStarting?.Invoke();
                 Execute("ROLLBACK");
                 return;
             }
@@ -181,6 +182,10 @@ public sealed class TursoRawConnection : IDisposable
             }
         }
     }
+
+    /// <summary>Runs before each attempt in <see cref="Rollback"/>. A test seam: throwing from it is how a test makes
+    /// a rollback fail, which otherwise takes a checkpoint outlasting the busy timeout.</summary>
+    internal Action? RollbackStarting { get; set; }
 
     /// <summary>Back off before another attempt, or false when the deadline leaves no time for one. Same rules as
     /// <see cref="TursoSyncDatabase.Connect"/>: the busy timeout bounds the whole operation, so never sleep past the

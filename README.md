@@ -126,6 +126,8 @@ coordinate temporary changes with other database users if logging only one push.
 `BeginTransaction()` and `BeginTransactionAsync()` take the write lock at the start (`BEGIN IMMEDIATE`), matching
 Microsoft.Data.Sqlite. A contended BEGIN waits for up to the busy timeout, then fails with `IsBusy`. Nothing can
 commit past the transaction, so a read followed by a write can't fail with a stale snapshot (`IsBusySnapshot`).
+`BeginTransactionAsync()` runs synchronously, so a contended BEGIN blocks the calling thread for up to the busy
+timeout. Avoid calling it on a UI thread.
 
 While one is open, other writers wait for it. On a synced database so do pulls and cold opens, which fail busy if
 it outlasts the busy timeout, and `Checkpoint()` fails busy at once. Keep transactions short, and don't hold one

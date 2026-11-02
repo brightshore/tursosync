@@ -136,6 +136,9 @@ public sealed class TursoConnection : DbConnection
 
     internal int DefaultTimeout => _options.DefaultTimeout;
 
+    /// <summary>True if a transaction is open on this connection; false when it is closed.</summary>
+    internal bool InTransaction => _physical?.Raw.InTransaction ?? false;
+
     internal bool ReadUncommitted
     {
         get => _readUncommitted;
@@ -451,10 +454,15 @@ public sealed class TursoTransaction : DbTransaction
         {
             _connection.Raw.Rollback();
         }
-        finally
+        catch when (!_connection.InTransaction)
         {
             Complete();
+            throw;
         }
+
+        // A rollback that failed leaves the transaction open, holding its locks, so it isn't complete: the caller
+        // can try again.
+        Complete();
     }
 
     /// <inheritdoc/>
@@ -462,7 +470,18 @@ public sealed class TursoTransaction : DbTransaction
     {
         if (disposing && !_completed)
         {
-            Rollback();
+            try
+            {
+                Rollback();
+            }
+            catch (TursoException)
+            {
+                // Nothing can retry after a dispose, and throwing here would replace whatever exception is unwinding
+                // through the using block. Closing ends the transaction: it retries the rollback, and disposes the
+                // physical connection if that fails too, which releases the locks and discards the writes.
+                _connection.Close();
+                Complete();
+            }
         }
 
         base.Dispose(disposing);
