@@ -21,8 +21,9 @@ public sealed partial class TursoSyncDatabase : IDisposable
     internal object Gate => _gate;
 
     /// <summary>
-    /// Held exclusively while <see cref="Pull"/> applies its changes, and shared by every prepare, statement step and
-    /// statement IO continuation on this database's connections, for that one native call.
+    /// Held exclusively while <see cref="Pull"/> applies its changes and while <see cref="Checkpoint"/> runs, and shared
+    /// by every prepare, statement step and statement IO continuation on this database's connections, for that one
+    /// native call.
     ///
     /// <para>The engine waits out a busy step only when the step itself answers busy; a busy raised as an ERROR
     /// inside the step skips its busy handler (<c>Statement::step</c> in core/statement.rs invokes it on
@@ -32,6 +33,12 @@ public sealed partial class TursoSyncDatabase : IDisposable
     /// engine waits for those too, the apply and the native calls take turns here: a statement waits for an apply in
     /// progress, and an apply waits only for the calls already under way. The download before the apply, which can
     /// take seconds on a slow network, holds nothing here.</para>
+    ///
+    /// <para>A checkpoint needs the same turn. For as long as it or an apply runs, the SDK's <c>SyncBusyGate</c>
+    /// (sdk-kit/src/rsapi.rs, raised in sync/sdk-kit/src/rsapi.rs) fails every prepare and step with "database is
+    /// locked" before it reaches the WAL, so even a transaction holding the write lock failed, though neither a
+    /// checkpoint nor anyone else could move the WAL past it. Waiting here retries nothing, so it can't spin on a stale
+    /// snapshot: that error still surfaces when the statement runs (the note in <see cref="TursoRawConnection"/>).</para>
     ///
     /// <para>Recursive, because the schema guard can step a statement on a thread that already holds it. A user
     /// function, aggregate or collation runs holding none of it (<see cref="ApplyGateHolds"/>).</para>
@@ -50,6 +57,10 @@ public sealed partial class TursoSyncDatabase : IDisposable
 
     /// <summary>Test signal when a local statement needs its I/O pump.</summary>
     internal Action? LocalIoStarting { get; set; }
+
+    /// <summary>A test seam: false leaves the apply gate alone during <see cref="Checkpoint"/>, the one way left to put a
+    /// real engine busy in front of <see cref="TursoRawConnection.Prepare"/> and test how it treats one.</summary>
+    internal bool CheckpointTakesApplyGate { get; set; } = true;
 
     /// <summary>
     /// Optional callback for one safe diagnostic per completed HTTP request (including failed requests).
@@ -331,7 +342,23 @@ public sealed partial class TursoSyncDatabase : IDisposable
         lock (_gate)
         {
             ThrowIfDisposed();
-            DriveAndDeinit(Begin(TursoNative.SyncDatabaseCheckpoint, "checkpoint"), "checkpoint");
+            var gated = CheckpointTakesApplyGate;
+            if (gated)
+            {
+                _applyGate.EnterWriteLock();
+            }
+
+            try
+            {
+                DriveAndDeinit(Begin(TursoNative.SyncDatabaseCheckpoint, "checkpoint"), "checkpoint");
+            }
+            finally
+            {
+                if (gated)
+                {
+                    _applyGate.ExitWriteLock();
+                }
+            }
         }
     }
 
