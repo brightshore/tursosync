@@ -4,7 +4,7 @@
 ### Patch Changes
 
 - Updated dependencies
-  - TursoSync@1.10.0
+  - TursoSync@1.9.3
 
 ## 1.9.2
 ### Patch Changes
