@@ -287,20 +287,21 @@ public class TursoBusyTimeoutTests
                         stage = "write";
                         conn.Execute($"INSERT INTO t (payload) VALUES ('{payload}')");
                         stage = "commit";
+
+                        // Cleared before COMMIT, not after: the flag only ever says the lock is certainly held.
+                        Volatile.Write(ref holdingWriteLock, 0);
                         conn.Execute("COMMIT");
                         open = false;
-                        Volatile.Write(ref holdingWriteLock, 0);
                         Interlocked.Increment(ref committed);
                     }
                     catch (TursoException ex) when (ex.IsBusy || ex.IsBusySnapshot)
                     {
                         failures.Enqueue($"{stage}: {ex.Message.Split('\n')[0]}");
+                        Volatile.Write(ref holdingWriteLock, 0);
                         if (open)
                         {
                             RollBack(conn);
                         }
-
-                        Volatile.Write(ref holdingWriteLock, 0);
                     }
                 }
             });
