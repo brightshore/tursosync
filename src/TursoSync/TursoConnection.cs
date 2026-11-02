@@ -370,6 +370,10 @@ public sealed class TursoConnection : DbConnection
     /// means the wait happens there instead, under the busy timeout, and nothing can invalidate the read. It also
     /// means other writers wait for this transaction, so a transaction that only reads should ask for
     /// <see cref="BeginTransaction(bool)"/> with <c>deferred: true</c>.</para>
+    ///
+    /// <para>As a last resort this closes the connection: when a failed BEGIN leaves it in a transaction that can't be
+    /// rolled back either, closing is what releases the write lock. Check <see cref="State"/> before retrying on
+    /// <see cref="TursoException.IsBusy"/>. Such a call can take up to about three busy timeouts.</para>
     /// </summary>
     public new TursoTransaction BeginTransaction() => BeginTransaction(IsolationLevel.Unspecified);
 
