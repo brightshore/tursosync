@@ -422,8 +422,33 @@ public sealed class TursoTransaction : DbTransaction
         _connection = connection;
         IsolationLevel = NormalizeIsolationLevel(isolationLevel);
 
-        // First, because taking the write lock can fail busy, and that must leave the connection as it was.
-        connection.ExecuteNonQuery(deferred ? "BEGIN" : "BEGIN IMMEDIATE");
+        // First, because taking the write lock can fail busy, and that must leave the connection as it was. The engine
+        // doesn't always: under load a BEGIN IMMEDIATE that failed busy can leave the connection in a transaction holding
+        // the write lock, and the caller gets no TursoTransaction to end it with. A BEGIN refused because one was already
+        // open is not that. This checks in the catch body, not a filter, because the connection only enters that state
+        // when the failed statement is disposed, and a filter runs before that.
+        var alreadyInTransaction = connection.InTransaction;
+        try
+        {
+            connection.ExecuteNonQuery(deferred ? "BEGIN" : "BEGIN IMMEDIATE");
+        }
+        catch (TursoException)
+        {
+            if (!alreadyInTransaction && connection.InTransaction)
+            {
+                try
+                {
+                    connection.Raw.Rollback();
+                }
+                catch (TursoException)
+                {
+                    connection.Close();
+                }
+            }
+
+            throw;
+        }
+
         if (IsolationLevel == IsolationLevel.ReadUncommitted)
         {
             connection.ReadUncommitted = true;
@@ -454,9 +479,14 @@ public sealed class TursoTransaction : DbTransaction
         {
             _connection.Raw.Rollback();
         }
-        catch when (!_connection.InTransaction)
+        catch
         {
-            Complete();
+            // In the body, not a filter, which would run before the failed statement is disposed.
+            if (!_connection.InTransaction)
+            {
+                Complete();
+            }
+
             throw;
         }
 
@@ -477,9 +507,14 @@ public sealed class TursoTransaction : DbTransaction
             catch (TursoException)
             {
                 // Nothing can retry after a dispose, and throwing here would replace whatever exception is unwinding
-                // through the using block. Closing ends the transaction: it retries the rollback, and disposes the
-                // physical connection if that fails too, which releases the locks and discards the writes.
-                _connection.Close();
+                // through the using block. Closing ends a transaction still open: it retries the rollback, and disposes
+                // the physical connection if that fails too, which releases the locks and discards the writes. With no
+                // transaction left there is nothing to release, so the connection stays open.
+                if (_connection.InTransaction)
+                {
+                    _connection.Close();
+                }
+
                 Complete();
             }
         }
