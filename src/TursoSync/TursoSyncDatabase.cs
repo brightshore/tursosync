@@ -347,7 +347,7 @@ public sealed partial class TursoSyncDatabase : IDisposable
         lock (_gate)
         {
             ThrowIfDisposed();
-            var gated = CheckpointTakesApplyGate;
+            var gated = false;
             if (gated)
             {
                 _applyGate.EnterWriteLock();
