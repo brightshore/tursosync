@@ -14,6 +14,10 @@ namespace TursoSync.Tests;
 /// roughly that long before giving up, so a failure returning in microseconds means nothing waited. The
 /// engine's busy handler covers step only; <see cref="TursoRawConnection.Prepare"/> now gives a prepare the
 /// same wait outside a transaction, and these tests pin both halves of that contract.</para>
+///
+/// <para>A checkpoint no longer causes those busies: statements wait for it on
+/// <see cref="TursoSyncDatabase.ApplyGate"/>. The tests of Prepare's own rules therefore run their checkpoints with
+/// <see cref="TursoSyncDatabase.CheckpointTakesApplyGate"/> off, which is how they still meet a real engine busy.</para>
 /// </summary>
 [TestClass]
 public class TursoBusyTimeoutTests
@@ -36,8 +40,8 @@ public class TursoBusyTimeoutTests
         SkipUnlessNative();
 
         var noCheckpoint = Measure(ShortTimeoutMs, CheckpointEveryMs, checkpointing: false);
-        var shortTimeout = Measure(ShortTimeoutMs, CheckpointEveryMs, checkpointing: true);
-        var longTimeout = Measure(LongTimeoutMs, CheckpointEveryMs, checkpointing: true);
+        var shortTimeout = Measure(ShortTimeoutMs, CheckpointEveryMs, checkpointing: true, gatedCheckpoint: false);
+        var longTimeout = Measure(LongTimeoutMs, CheckpointEveryMs, checkpointing: true, gatedCheckpoint: false);
 
         Report($"{ShortTimeoutMs}ms, no checkpoint", noCheckpoint);
         Report($"{ShortTimeoutMs}ms + checkpoint", shortTimeout);
@@ -68,7 +72,7 @@ public class TursoBusyTimeoutTests
 
         // Checkpoints back to back hold the lock nearly all the time, so a prepare often runs out its timeout.
         // When it does, it must give up at the timeout, not wait on past it, and not fail early either.
-        var held = Measure(ShortTimeoutMs, checkpointEveryMs: 0, checkpointing: true);
+        var held = Measure(ShortTimeoutMs, checkpointEveryMs: 0, checkpointing: true, gatedCheckpoint: false);
         Report($"{ShortTimeoutMs}ms + constant checkpoints", held);
 
         // No prepare ran out its timeout, so there is nothing to time: say so rather than pass.
@@ -93,7 +97,7 @@ public class TursoBusyTimeoutTests
         // surface straight away for the caller to roll back and restart.
         // Periodic, not constant: back-to-back checkpoints leave no gap for a transaction to open or even roll
         // back in, and the arm then measures a connection stuck in its transaction rather than prepares inside one.
-        var inTx = Measure(LongTimeoutMs, CheckpointEveryMs, checkpointing: true, inTransaction: true);
+        var inTx = Measure(LongTimeoutMs, CheckpointEveryMs, checkpointing: true, inTransaction: true, gatedCheckpoint: false);
         Report($"{LongTimeoutMs}ms + checkpoint, in a transaction", inTx);
 
         // Typically ~20 a run. A retry inside a transaction makes it 0, so any at all shows they weren't retried.
@@ -101,6 +105,226 @@ public class TursoBusyTimeoutTests
         inTx.PrepareBusy.Should().BeGreaterThan(0, "a busy prepare inside a transaction surfaces instead of being retried");
         inTx.MedianPrepareFailMs.Should().BeLessThan(LongTimeoutMs / 10.0,
             "inside a transaction a busy prepare is not retried");
+    }
+
+    [TestMethod]
+    public void A_Checkpoint_Fails_No_Statement_In_Or_Out_Of_A_Transaction()
+    {
+        SkipUnlessNative();
+
+        // The short timeout is the point: nothing here waits for the busy timeout, so it can't run out.
+        var outside = Measure(ShortTimeoutMs, CheckpointEveryMs, checkpointing: true);
+        var inside = Measure(ShortTimeoutMs, CheckpointEveryMs, checkpointing: true, inTransaction: true);
+        Report($"{ShortTimeoutMs}ms + gated checkpoint", outside);
+        Report($"{ShortTimeoutMs}ms + gated checkpoint, in a transaction", inside);
+
+        outside.Busy.Should().Be(0, outside.TopMessage);
+        inside.Busy.Should().Be(0, inside.TopMessage);
+        outside.Ok.Should().BeGreaterThan(0);
+        inside.Ok.Should().BeGreaterThan(0);
+    }
+
+    [TestMethod]
+    public void A_Stale_Snapshot_Queued_Behind_A_Checkpoint_Still_Fails_At_Once()
+    {
+        SkipUnlessNative();
+
+        // Waiting for a checkpoint must not turn into the spin in TursoRawConnection's note. The stale write queues on
+        // the gate a real checkpoint holds, and once let through it fails with the error that says to restart, without
+        // waiting on. If a checkpoint stopped taking the gate, the write would never queue.
+        var dbPath = TempDb();
+        try
+        {
+            using var db = TursoSyncDatabase.Create(new TursoSyncConfig { Path = dbPath, BootstrapIfEmpty = false });
+            using var conn = TursoRawConnection.Open(db, LongTimeoutMs);
+            using var other = TursoRawConnection.Open(db, LongTimeoutMs);
+            conn.Execute("CREATE TABLE t (x INTEGER PRIMARY KEY)");
+
+            conn.Execute("BEGIN");
+            conn.QueryScalar("SELECT count(*) FROM t");
+            other.Execute("INSERT INTO t VALUES (1)");
+
+            Task<TursoException?>? write = null;
+            var queued = false;
+            db.CheckpointStarting = () =>
+            {
+                write = Task.Run(() =>
+                {
+                    try
+                    {
+                        conn.Execute("INSERT INTO t VALUES (2)");
+                        return null;
+                    }
+                    catch (TursoException ex)
+                    {
+                        return ex;
+                    }
+                });
+                queued = SpinWait.SpinUntil(() => db.ApplyGate.WaitingReadCount > 0, TimeSpan.FromSeconds(5));
+            };
+
+            try { db.Checkpoint(); }
+            catch (TursoException ex) when (ex.IsBusy) { /* the open read transaction may refuse it */ }
+
+            // From here, not earlier: the checkpoint's own run time isn't the write's.
+            var sw = Stopwatch.StartNew();
+
+            // Before any assertion: the connection and database are disposed on the way out, under a running write.
+            write!.Wait(TimeSpan.FromSeconds(30)).Should().BeTrue("the write finishes once the checkpoint lets it through");
+            sw.Stop();
+
+            queued.Should().BeTrue("the write queues behind the checkpoint");
+            write.Result.Should().NotBeNull("a stale write fails");
+            write.Result!.IsBusySnapshot.Should().BeTrue();
+            sw.ElapsedMilliseconds.Should().BeLessThan(LongTimeoutMs / 2, "a stale snapshot is not waited on");
+            conn.Execute("ROLLBACK");
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
+    }
+
+    [TestMethod]
+    public void A_User_Function_May_Checkpoint_The_Database_Running_It()
+    {
+        SkipUnlessNative();
+
+        // The function runs inside a native step, which holds the gate shared. Checkpoint asks for it exclusively, and
+        // ReaderWriterLockSlim refuses that upgrade unless the step's hold is let go first (ApplyGateHolds).
+        var dbPath = TempDb();
+        try
+        {
+            using var db = TursoSyncDatabase.Create(new TursoSyncConfig { Path = dbPath, BootstrapIfEmpty = false });
+            using var conn = TursoRawConnection.Open(db, LongTimeoutMs);
+            Exception? thrown = null;
+            var ran = false;
+            conn.RegisterScalarFunction("checkpoint_now", 0, deterministic: false, _ =>
+            {
+                ran = true;
+                try { db.Checkpoint(); }
+                catch (Exception ex) { thrown = ex; }
+                return 1L;
+            });
+            conn.Execute("CREATE TABLE t (x INTEGER PRIMARY KEY)");
+            conn.Execute("INSERT INTO t VALUES (1)");
+
+            conn.QueryScalar("SELECT checkpoint_now()").Should().Be(1L);
+
+            ran.Should().BeTrue();
+            thrown.Should().BeNull();
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
+    }
+
+    [TestMethod]
+    public void A_Transaction_Holding_The_Write_Lock_Rides_Out_Checkpoints()
+    {
+        SkipUnlessNative();
+
+        var dbPath = TempDb();
+        try
+        {
+            using var db = TursoSyncDatabase.Create(new TursoSyncConfig { Path = dbPath, BootstrapIfEmpty = false });
+            using var conn = TursoRawConnection.Open(db, LongTimeoutMs);
+            using var writerConn = TursoRawConnection.Open(db, LongTimeoutMs);
+            conn.Execute("CREATE TABLE t (x INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT)");
+
+            var payload = new string('p', 2048);
+            var committed = 0;
+            var checkpointAttempts = 0;
+            var holdingWriteLock = 0;
+            var checkpointsAcrossATransaction = 0;
+            var failures = new ConcurrentQueue<string>();
+            db.CheckpointStarting = () =>
+            {
+                if (Volatile.Read(ref holdingWriteLock) == 1)
+                {
+                    Interlocked.Increment(ref checkpointsAcrossATransaction);
+                }
+            };
+            using var done = new CancellationTokenSource(TimeSpan.FromSeconds(MeasureSeconds));
+            var ct = done.Token;
+
+            var writer = Task.Run(() =>
+            {
+                while (!ct.IsCancellationRequested)
+                {
+                    try { writerConn.Execute($"INSERT INTO t (payload) VALUES ('{payload}')"); }
+                    catch { /* this writer only keeps the WAL moving; the transactions below are measured */ }
+                }
+            });
+
+            var checkpointer = Task.Run(() =>
+            {
+                while (!ct.IsCancellationRequested)
+                {
+                    // Most attempts fail, because a transaction holds the lock. They count anyway: the SDK fails
+                    // statements for as long as an attempt runs, however it ends.
+                    Interlocked.Increment(ref checkpointAttempts);
+                    try { db.Checkpoint(); }
+                    catch { /* that failure is not what is measured */ }
+                    Thread.Sleep(CheckpointEveryMs);
+                }
+            });
+
+            var transactions = Task.Run(() =>
+            {
+                while (!ct.IsCancellationRequested)
+                {
+                    var stage = "begin";
+                    var open = false;
+                    try
+                    {
+                        conn.Execute("BEGIN IMMEDIATE");
+                        open = true;
+                        Volatile.Write(ref holdingWriteLock, 1);
+                        stage = "read";
+                        conn.QueryScalar("SELECT count(*) FROM t");
+                        stage = "write";
+                        conn.Execute($"INSERT INTO t (payload) VALUES ('{payload}')");
+                        stage = "commit";
+
+                        // With the lock held and the flag set, so that checkpoints land here: on Windows most of a
+                        // transaction's time is otherwise inside COMMIT, where the flag has to be clear.
+                        Thread.Sleep(1);
+
+                        // Cleared before COMMIT, not after: the flag only ever says the lock is certainly held.
+                        Volatile.Write(ref holdingWriteLock, 0);
+                        conn.Execute("COMMIT");
+                        open = false;
+                        Interlocked.Increment(ref committed);
+                    }
+                    catch (TursoException ex) when (ex.IsBusy || ex.IsBusySnapshot)
+                    {
+                        failures.Enqueue($"{stage}: {ex.Message.Split('\n')[0]}");
+                        Volatile.Write(ref holdingWriteLock, 0);
+                        if (open)
+                        {
+                            RollBack(conn);
+                        }
+                    }
+                }
+            });
+
+            Task.WaitAll(writer, checkpointer, transactions);
+
+            var byKind = failures.GroupBy(f => f).Select(g => $"{g.Count()} x {g.Key}").ToArray();
+            Console.WriteLine($"[busy] write-lock transactions: committed={committed} checkpoint-attempts={checkpointAttempts} " +
+                $"across-a-transaction={checkpointsAcrossATransaction} " +
+                $"failed={failures.Count} {string.Join("; ", byKind)}");
+
+            committed.Should().BeGreaterThan(0);
+            checkpointsAcrossATransaction.Should().BeGreaterThan(0, "a checkpoint has to start while a transaction holds the write lock");
+            byKind.Should().BeEmpty("a checkpoint must not fail a statement in a transaction holding the write lock");
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
     }
 
     private sealed record Result(
@@ -118,13 +342,15 @@ public class TursoBusyTimeoutTests
         }
     }
 
-    private static Result Measure(int busyTimeoutMs, int checkpointEveryMs, bool checkpointing, bool inTransaction = false)
+    private static Result Measure(
+        int busyTimeoutMs, int checkpointEveryMs, bool checkpointing, bool inTransaction = false, bool gatedCheckpoint = true)
     {
         Trace($"Measure(busyTimeout={busyTimeoutMs}, checkpointEvery={checkpointEveryMs}, checkpointing={checkpointing}, tx={inTransaction}) start");
         var dbPath = TempDb();
         try
         {
             using var db = TursoSyncDatabase.Create(new TursoSyncConfig { Path = dbPath, BootstrapIfEmpty = false });
+            db.CheckpointTakesApplyGate = gatedCheckpoint;
             using (var seed = TursoRawConnection.Open(db, busyTimeoutMs))
             {
                 seed.Execute("CREATE TABLE t (x INTEGER PRIMARY KEY, payload TEXT)");

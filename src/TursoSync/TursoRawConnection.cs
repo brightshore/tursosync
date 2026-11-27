@@ -61,6 +61,13 @@ public sealed class TursoRawConnection : IDisposable
     // the WAL as the finished checkpoint left it. Inside a transaction the connection holds a snapshot a
     // checkpoint may have made stale, so there a busy prepare still fails at once, as it always has, and the
     // caller rolls back and restarts. Step is still never retried here.
+    //
+    // A checkpoint no longer reaches either of those paths. Almost every busy it caused came from the SDK's
+    // SyncBusyGate, which fails prepare and step for the checkpoint's whole length before they touch the WAL,
+    // so it isn't the busy the first bullet describes and no busy handler sees it. Statements now wait for the
+    // checkpoint on TursoSyncDatabase.ApplyGate instead, in or out of a transaction. That wait repeats nothing,
+    // so it cannot spin: a stale snapshot still fails when its statement runs, with BusySnapshot, at once. The
+    // retry above stays for any other busy a prepare may meet.
 
     /// <summary>The owning synced database, or null for a base (local, non-sync) connection.</summary>
     public TursoSyncDatabase? SyncDatabase => _syncDatabase;
@@ -125,7 +132,9 @@ public sealed class TursoRawConnection : IDisposable
     /// <summary>
     /// Prepare a single statement.
     ///
-    /// <para>Outside a transaction, a prepare that finds the database locked (a checkpoint holds it, typically)
+    /// <para>A prepare on a synced database first waits for any checkpoint or pull apply in progress, in or out
+    /// of a transaction (<see cref="TursoSyncDatabase.ApplyGate"/>), and that wait is not limited by the busy timeout.
+    /// Outside a transaction, a prepare that still finds the database locked
     /// is retried until the connection's busy timeout runs out, the wait the engine's own busy handler gives a
     /// step but not a prepare. Inside a transaction it is not: lock contention surfaces at once as a
     /// <see cref="TursoException"/> with <see cref="TursoException.IsBusy"/> or

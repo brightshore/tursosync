@@ -115,7 +115,8 @@ public class TursoException : Exception
     /// preparing, so <see cref="TursoRawConnection.Prepare"/> gives a contended <c>prepare</c> the same wait
     /// itself while the connection is in autocommit, and this surfaces only once the busy timeout has run out.
     /// Inside a transaction a contended <c>prepare</c> still surfaces here immediately, whatever the timeout
-    /// (measured in <c>TursoBusyTimeoutTests</c>).</para>
+    /// (measured in <c>TursoBusyTimeoutTests</c>). A checkpoint or pull apply in progress on the same database is
+    /// not contention of this kind: statements wait for it first, in or out of a transaction.</para>
     /// </summary>
     public bool IsBusy => Kind is TursoErrorKind.Busy;
 
